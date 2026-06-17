@@ -318,8 +318,8 @@ export default function CwPlantTwin() {
           <ValveGlyph x={690} y={495} id="cv5" label="ACCU (CV-5)" pos={I.cv5} />
           <Lbl x={596} y={486} size={13}>ACCU (CV-5)</Lbl>
           <ValBox x={563} y={500} w={66} text={`${I.cv5.toFixed(1)} %`} color={C.amber} />
-          <text x={596} y={536} textAnchor="middle" fontSize="11" fontFamily={SANS} fill={C.lab}>100% Full By-Pass</text>
-          <text x={596} y={550} textAnchor="middle" fontSize="11" fontFamily={SANS} fill={C.lab}>0% Full System Flow</text>
+          <text x={596} y={536} textAnchor="middle" fontSize="11" fontFamily={SANS} fill={C.lab}>0% Full By-Pass</text>
+          <text x={596} y={550} textAnchor="middle" fontSize="11" fontFamily={SANS} fill={C.lab}>100% Full System Flow</text>
 
           {/* pumps + status */}
           <PumpGlyph x={800} y={400} id="p4" label="P4" speed={I.p4} on={I.p4on} />
