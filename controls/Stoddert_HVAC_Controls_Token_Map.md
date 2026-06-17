@@ -1,12 +1,12 @@
 # Stoddert_HVAC_Controls_Token_Map.md
 
-**Project:** Stoddert ES Modernization · DG-22-S002
-**Role:** authoritative **token namespace** for the control-points map. Every row in `io_matrix.json`,
-`points_list.md`, `sequence_xref.md`, `coverage_report.md` binds on a `token` defined here.
-Seeded from the SOO drawings (M501/M502/M503), the Div 23 spec basis, and the 2025-11-21 capture.
+**Project:** Stoddert ES Modernization · DG-22-S002 / DCAM-22-CS-RFP-0009
+**Role of this file:** authoritative **token namespace** for the control-points map. Every row in
+`io_matrix.json`, `points_list.md`, `sequence_xref.md`, and `coverage_report.md` binds on a `token`
+defined here. Seeded from the in-scope element list (`Source_Bundle.md` §0) and the capture (§4).
 
-> Tokens are stable identifiers, not BAS object names (`bas_name` holds the object name).
-> **SCADA tokens are primary** (match enteliWEB). SOO/points-list aliases are carried in §4, **not merged**.
+> Tokens are stable identifiers, not BAS object names. The BAS object name lives in `bas_name`.
+> Nothing here asserts a Cv, capacity, range, or sequence value — those come from the drawings (§5).
 
 ---
 
@@ -18,68 +18,76 @@ Seeded from the SOO drawings (M501/M502/M503), the Div 23 spec basis, and the 20
 | `PMP-` | Pump (VFD) | `PMP-P3` |
 | `CV-` | Modulating control valve | `CV-5` |
 | `BV-` | Balancing valve (TAB, meter-port) | `BV-WSHP-1-4` |
-| `FM-` | Flow meter | `FM-2`, `FM-GWS` |
-| `BTU-` | Energy (BTU) meter | `BTU-1` |
-| `TS-`/`TT-` | Temperature sensor (RTD) | `TS-4`, `TT-LWT` |
-| `PT-` | Pressure transducer (wellfield flow display) | `PT-1` |
-| `PDT-` | Differential-pressure transmitter (`DPS`) | `PDT-NEWADD` |
+| `FM-` | Flow / energy meter | `FM-2`, `FM-GWS` |
+| `TT-` | Temperature transmitter (RTD) | `TT-LWT` |
+| `PDT-` | Pressure / differential-pressure transmitter | `PDT-NEWADD` |
 | `AHT-` | Humidity transmitter | `AHT-OAH` |
-| `CS-` | Current sensor (heat-trace) | `CS-1` |
-| `VFD-` | Drive (aliased to its pump) | `VFD-1` → `PMP-P1` |
 | `WSHP-` | Water-source heat pump (unit) | `WSHP-2-6` |
-| `SP-` | Setpoint (analog value) | `SP-CHWDP` |
-| `PRM-` | Control parameter / mode | `PRM-PMPDOWN-TIME` |
-| `ST-`/`AL-` | Status-command / alarm (binary) | `ST-ACCU`, `AL-ACCU` |
-| `M-E`/`M-W` | Electric / water submeter (M501) | `M-E7`, `M-W1` |
-| `SYS` | Plant-global scope | `SYS` |
-| `MTR` | Submetering group | `MTR` |
-| `DOAS2.` / `WSHP.` | Unit-level namespacing (prevents tag collisions) | `DOAS2.CV-1`, `WSHP-1-3.CV-2` |
+| `SP-` | Setpoint (analog value) | `SP-LWT` |
+| `PRM-` | Control parameter / mode (binary or analog value) | `PRM-PMPDOWN-TIME` |
+| `ST-` | Status / command (binary) | `ST-ACCU` |
+| `AL-` | Alarm point | `AL-ACCU` |
+| `SYS` | Plant-global controller scope (no single equipment owner) | `SYS` |
 
-### 1.1 Sub-point suffixes
+### 1.1 Sub-point suffixes (dot notation)
 
-`.STS` status (BI) · `.CMD` start/stop (BO) · `.SPD` speed (AO) · `.FAULT` fault (BI) · `.HAND` running-in-hand (BI) · `.SUP`/`.RET` supply/return leg · `.BTU` energy · `.GPM` balanced flow (TAB, not live) · `.ECM-1.*` WSHP fan · `.CV-1`/`.CV-2` WSHP coil valves (3-way/2-way) · `.ACD-n`/`.D-1` dampers · `.SP-ADJ`/`.EWT`/`.OCC` Div23 WSHP BACnet · `.VFD-n.*` DOAS fans · `.WHEEL.SPD` energy wheel.
-
----
-
-## 2. Element registry
-
-| Element | Description | Resolved? |
+| Suffix | Meaning | Applies to |
 |---|---|---|
-| `EQ-ACCU-1` | Air-cooled HP chiller, fans C1–C4, M-7 submetered | **resolved** (SOO §3/§7; type & staging detail `[?]`) |
-| `EQ-WELLFIELD` | Geo loop: `TS-1/3/5`, `PT-1/2/3`, `BTU-1`, geo temps | **resolved** (TS-1/3/5 function `[?]`) |
-| `SYS` | Plant-global params, DP transmitters, heat-trace `CS-1..4` | **resolved** (DPS-1/2 assignment `[?]`) |
-| `PMP-P1…P4` | VFD pumps (P1/P2 primary VS, P3/P4 chiller const-vol) | **resolved** (curves `[?]`) |
-| `CV-1-1`,`CV-1-2` | Wellfield bypass `[SOO CV-1A/1B]` | **resolved** logic (Cv/fail `[?]`) |
-| `CV-3` | Min-flow bypass `[list CV-2 — FLAG-A]` | **resolved** logic (Cv/fail `[?]`) |
-| `CV-5` | Chiller diverting `[SOO CV-4 — FLAG-B]` | **resolved** logic (Cv/fail `[?]`) |
-| `FM-2`,`FM-GWS` | BTU-metered branch flow; geo-loop flow `[=FM-1]` | **resolved** (metered branch `[?]`) |
-| `TT-LWT/EWT/OAT`,`AHT-OAH` | Outdoor/loop sensors | **resolved** |
-| `MTR` | Electric `M-E1..7` + water `M-W1/2` submeters | **resolved** |
-| `WSHP-1-1…2-8` | WSHP units (M502 unit I/O) | **resolved** I/O (capacities/types `[?]`) |
-| `BV-WSHP-*` | Per-unit balancing valve | `[?]` balanced GPM (TAB) |
-| `EQ-DOAS-2` | DOAS unit, M-6 submetered | **resolved** startup (secondary clauses/suffixes `[?]`) |
-| `EQ-BT-1`,`AS-1`,`AS-2`,`ET-5`,`CHEM-1` | Buffer/separators/expansion/chemical | `[?]` (points-list) |
+| `.STS` | Operating status (BI) | pumps, WSHP |
+| `.CMD` | Start/stop command (BO) | pumps, WSHP |
+| `.SPD` | VFD speed command (AO) | pumps |
+| `.POS` | Valve position command (AO) | CV-* |
+| `.SUP` / `.RET` | Supply / return leg reading | FM-2, sensors |
+| `.BTU` | Thermal-energy output | FM-2 |
+| `.GPM` | Balanced/design branch flow (TAB, not a live AI) | BV-WSHP-* |
+| `.SP-ADJ` | Setpoint adjustment (AV) | WSHP |
+| `.SAT` `.RAT` `.RH` `.EWT` | Supply-air / room-air temp, humidity, entering-water temp | WSHP |
+| `.OCC` | Occupied/unoccupied schedule (BV) | WSHP |
+| `.FAULT` | Fault relay (BI) | WSHP |
+| `.SCHED` | Scheduled-operation relay (BO) | WSHP |
+| `.C1`…`.C4` | ACCU condenser-fan stages | EQ-ACCU-1 |
 
 ---
 
-## 3. Source + confidence legend
+## 2. Element registry (from `Source_Bundle.md` §0)
 
-`src`: **CAP** observed (capture §4) · **SPEC** Div 23 basis · **DWG** drawing/SOO (M501/M502/M503).
-`conf`: **V** verified (CAP value or DWG/SOO verbatim) · **A** spec-assumed (Div23 integration point, confirm on points-list) · **?** unresolved (sheet named in `coverage_report.md`).
-
-> **No `PT1`/`PT2`** capture points were invented; `PT-1/2/3` here are the **wellfield pressure transducers** from the SOO points list (07/M503), absent from the 11/21 capture screen but real by design.
+| Element token | Description | Source basis | Resolved points? |
+|---|---|---|---|
+| `EQ-ACCU-1` | Rooftop heat-rejection / condenser unit; fans C1–C4 (free-cooling) | §2.6 type, §4 status & setpoints | **partial** (CAP status/SP; staging logic & type `[?]`) |
+| `EQ-DOAS-2` | Dedicated outdoor-air system | §0 only | **`[?]`** (points-list, equip schedule, SOO) |
+| `EQ-WELLFIELD` | Geo wellfield + replenish | §4 replenish flag; §2.6 geo piping | **partial** (CAP flag; capacity `[?]`) |
+| `EQ-BT-1` | Buffer tank | §0 only | **`[?]`** (points-list, equip schedule) |
+| `EQ-AS-1` / `EQ-AS-2` | Air separators | §0 only | **`[?]`** (points-list — may be mechanical-only) |
+| `EQ-ET-5` | Expansion tank | §0 only | **`[?]`** (points-list — may be mechanical-only) |
+| `EQ-CHEM-1` | Chemical treatment | §2.7 scope | **`[?]`** (points-list) |
+| `PMP-P1`…`PMP-P4` | VFD pumps | §4 sts/cmd/spd; §2.5 DP control | **partial** (CAP I/O; curves/role/lead-lag `[?]`) |
+| `CV-5` | ACCU valve | §4 position; §2.2 device | **partial** (CAP pos; Cv/fail/logic `[?]`) |
+| `CV-3` | GWS min-flow valve | §4 position; §2.2 device | **partial** (CAP pos; Cv/fail/logic `[?]`) |
+| `CV-1-1` / `CV-1-2` | GWS bypass valves | §4 position; §2.2 device | **partial** (CAP pos; Cv/fail/logic `[?]`) |
+| `BV-WSHP-<id>` | Per-unit balancing valve, meter port | §2.4 device | **`[?]`** (balanced GPM from WSHP schedule / TAB) |
+| `FM-2` | Onicon ultrasonic BTU meter | §2.3 device; §4 flow/sup/ret | **partial** (CAP flow/temps; metered branch `[?]`) |
+| `FM-GWS` | Electromagnetic mains flowmeter | §2.3 device; §4 flow | **partial** (CAP flow; which main `[?]`) |
+| `TT-LWT` `TT-EWT` `TT-GWST` `TT-GWRT` `TT-GEOST` `TT-GEORT` `TT-OAT` | RTD temperature transmitters | §2.3 device; §2.1 accuracy; §4 value | **resolved** (CAP value + SPEC accuracy) |
+| `AHT-OAH` | OA humidity transmitter | §2.3 device; §2.1 accuracy; §4 value | **resolved** |
+| `PDT-NEWADD` `PDT-EXISTBLDG` | DP transmitters | §2.3 device; §2.1 accuracy; §4 value | **resolved** (range `[?]`) |
+| `WSHP-1-1`…`WSHP-1-8` | WSHP network 1 | §2.4 BACnet template | **partial** (SPEC points; capacities/EWT `[?]`) |
+| `WSHP-2-1`…`WSHP-2-8` | WSHP network 2 | §2.4 BACnet template | **partial** (esp. `WSHP-2-4/2-5` types `[?]`) |
+| `SYS` | Plant-global control parameters | §4 SYSTEM-EN/RESET/PMPDOWN; §2.5 DP setpoint | **partial** (owning controller per points-list `[?]`) |
 
 ---
 
-## 4. ⚠️ Tag reconciliation (points-list ↔ SOO ↔ enteliWEB) — carried, not merged
+## 3. Confidence + source legend
 
-| Function | Points-list (07) | SOO (08) | enteliWEB | Token used | FLAG |
-|---|---|---|---|---|---|
-| Wellfield bypass | `CV-1` | `CV-1A`/`CV-1B` | `CV-1-1`/`CV-1-2` | **`CV-1-1`/`CV-1-2`** | — (corrects "GWS Bypass" = ground-loop, not building-DP) |
-| Min-flow valve | `CV-2` | `CV-3` | `CV-3` | **`CV-3`** | **FLAG-A** |
-| Chiller diverting | — | `CV-4` | `CV-5` | **`CV-5`** | **FLAG-B** |
-| Geo loop flow | `FM-1` | `FM-1/2` | "GWS Flow" | **`FM-GWS`** (=FM-1) | — |
-| Building DP | `DPS-1 & DPS-2` | `DPS-1/2` | "Existing/New Addition DP" | **`PDT-EXISTBLDG`/`PDT-NEWADD`** | -1 vs -2 `[?]` |
-| Compressor stages | — | — | "C1–C4" | **`ST-ACCU-C1..4`** | **FLAG-C** (≠ `CS-1..4` heat-trace) |
+| Code | `src` | meaning |
+|---|---|---|
+| `CAP` | enteliWEB capture 2025-11-21 (§4) — observed value only |
+| `SPEC` | Division 23 spec content (§2) — device/standard/accuracy/logic basis |
+| `DWG` | drawing/schedule (§5) — **not in repo**; emitted as `conf:"?"` placeholder |
 
-**Value FLAGS:** **FLAG-1** DP SP 12 PSI (SOO) vs 7.0 (capture) · **FLAG-2** geo max flow 500 (SOO) / 700 (RFI-183) / 780 (capture).
+| `conf` | meaning |
+|---|---|
+| `V` | verified from a definitive source (CAP value, or SPEC-enumerated point/characteristic) |
+| `A` | assumed from spec convention (e.g., transmitter signal protocol) — confirm on DDC riser |
+| `?` | unresolved — closed only by the §5 sheet named in `coverage_report.md` |
+
+> **No `PT1` / `PT2`** — absent from the capture; not created (per `Source_Bundle.md` §4 note).

@@ -37,12 +37,12 @@ export default function App() {
           </div>
 
           {/* Tab switcher */}
-          <nav style={{ display: "flex", gap: 6, marginLeft: "auto", background: C.box, border: `1px solid ${C.line}`, borderRadius: 10, padding: 4 }}>
+          <nav role="tablist" aria-label="Digital twin selector" style={{ display: "flex", gap: 6, marginLeft: "auto", background: C.box, border: `1px solid ${C.line}`, borderRadius: 10, padding: 4 }}>
             {TABS.map((t) => {
               const on = t.id === tab;
               const Icon = t.icon;
               return (
-                <button key={t.id} onClick={() => setTab(t.id)} style={{
+                <button key={t.id} type="button" role="tab" aria-selected={on} aria-label={t.label} onClick={() => setTab(t.id)} style={{
                   display: "inline-flex", alignItems: "center", gap: 7, cursor: "pointer",
                   border: "none", borderRadius: 7, padding: "8px 13px", fontSize: 12.5, fontWeight: 600,
                   fontFamily: SANS, transition: "all .15s ease",
@@ -62,7 +62,8 @@ export default function App() {
       </header>
 
       <main style={{ maxWidth: 1380, margin: "0 auto" }}>
-        {tab === "plant" ? <CwPlantTwin /> : <WshpHydraulicTwin />}
+        <section hidden={tab !== "plant"}><CwPlantTwin /></section>
+        <section hidden={tab === "plant"}><WshpHydraulicTwin /></section>
       </main>
 
       <style>{`
