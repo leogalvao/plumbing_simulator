@@ -2,9 +2,10 @@ import React, { useState, useMemo, useRef, useEffect } from "react";
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceDot,
 } from "recharts";
-import { AlertTriangle, RotateCcw, Zap, Droplets, Thermometer, Activity } from "lucide-react";
+import { AlertTriangle, RotateCcw, Zap, Droplets, Thermometer, Activity, Beaker } from "lucide-react";
 import { C, MONO, SANS, clamp, f1, f0 } from "../theme.js";
 import { Slider, Toggle, Panel, Stat, InfoDot } from "../components.jsx";
+import { freezePointF, burstPointF, concForFreeze, props as glProps, impacts as glImpacts, CURRENT_PCT, RECOMMENDED_PCT } from "../glycol.js";
 
 /* ========================================================================== *
  *  Stoddert ES — CW / Geo-Exchange Plant · Interactive Digital Twin           *
@@ -53,7 +54,7 @@ function segHyd(Q, D_in, L, rough, rho, tF) {
   const Re = (rho * v * Dft) / Math.max(mu, 1e-9), f = frictionFactor(Re, rough / Dft);
   return { dP: (f * (L / Dft) * rho * v * v) / 2 / 144, v, Re };
 }
-const FLUIDS = { Water: { rho: 62.3, muMul: 1.0 }, "30% PG Glycol": { rho: 65.3, muMul: 1.85 } };
+/* Fluid properties now come from ../glycol.js (continuous glycol model; 0% = water). */
 
 /* --------------------------------------------------------------------------
  *  CV-5 CONVENTION — SINGLE SOURCE OF TRUTH.
@@ -107,13 +108,17 @@ const BASE = {
   p1: 100, p2: 0, p3: 65, p4: 100, p1on: true, p2on: false, p3on: true, p4on: true,
   cv5: 25.3, cv3: 0, cv11: 0, cv12: 0,
   oat: 84.5, oah: 53.0 /* display-only */, geoST: 83.4, bldgTons: 82.6,
-  D: 8, L: 100, rough: 0.00015, fluid: "Water", accuOn: true,
+  D: 8, L: 100, rough: 0.00015, glycol: 0, glycolType: "PG", accuOn: true,
   lwtSP: 44, chwdpSP: 6.0, cv5tempSP: 75,
 };
 
 function computeState(I) {
-  const fl = FLUIDS[I.fluid] || FLUIDS.Water, rho = fl.rho;
   const loopT = 63;
+  const gp = glProps(I.glycolType, I.glycol, loopT);   // glycol fluid props (ratios vs water; 0% = water)
+  const rho = gp.rho, muMul = gp.muRatio;
+  const heatF = 500 * gp.rhoRatio * gp.cpRatio;        // ρ·cp heat-transport factor (500 = water baseline)
+  const freezeF = freezePointF(I.glycolType, I.glycol);
+  const burstF = burstPointF(I.glycolType, I.glycol);
 
   /* ---- 1. HYDRAULICS — pump curve ∩ quadratic system curve (affinity-exact) ---- */
   const bSpeed = (I.p1on ? I.p1 : 0) + (I.p2on ? I.p2 : 0);          // combined building-pump speed %
@@ -122,7 +127,7 @@ function computeState(I) {
   // geometry (D=8, L=100, water) with the wellfield bypass shut, the factor is 1.0.
   const segDesign = segHyd(Q_DESIGN, BASE.D, BASE.L, BASE.rough, 62.3, loopT);
   const segGeom = segHyd(Q_DESIGN, I.D, I.L, I.rough, rho, loopT);
-  let lossMul = (segGeom.dP / Math.max(segDesign.dP, 1e-9)) * Math.pow(fl.muMul, 0.5);
+  let lossMul = (segGeom.dP / Math.max(segDesign.dP, 1e-9)) * Math.pow(muMul, 0.5);
   lossMul *= 1 - 0.12 * (bypassAvg / 100);                          // opening bypass lowers resistance
   const Rsys = R0_SYS * Math.max(lossMul, 1e-3);
   // Pump ∩ system: n²·H0 − a·Q² = Rsys·Q²  ⇒  Q = N · √(H0/(a+Rsys))  (Q ∝ N, exactly).
@@ -134,14 +139,14 @@ function computeState(I) {
 
   // Differential pressures: anchored to the capture, scaling with flow² and resistance.
   const velocity = segHyd(GWS, I.D, I.L, I.rough, rho, loopT).v;
-  const dpScale = Math.pow(GWS / Q_DESIGN, 2) * Math.max(lossMul, 1e-3) * Math.pow(fl.muMul, 0.25);
+  const dpScale = Math.pow(GWS / Q_DESIGN, 2) * Math.max(lossMul, 1e-3) * Math.pow(muMul, 0.25);
   const NewDP = NEWDP_REF * dpScale;
   const ExistDP = EXISTDP_REF * dpScale;
 
   /* ---- 2. LOOP / GEOTHERMAL TEMPERATURES ---- */
   const GWST = I.geoST - GWS_SUPPLY_OFFSET;                          // GWS supply temp (geothermal loop)
   const bldgBtu = I.bldgTons * 12000;
-  const GWRT = GWST + bldgBtu / (500 * Math.max(GWS, 1));            // loop return rises with load / falls with flow
+  const GWRT = GWST + bldgBtu / (heatF * Math.max(GWS, 1));          // loop return rises with load / falls with flow (ρ·cp)
   const geoRT = I.geoST + (GWRT - GWST) / 2;                         // ground return warmer than supply (cooling)
 
   /* ---- 3. ACCU THERMAL — free-cooling floor + mechanical (compressor) cooling ---- */
@@ -150,7 +155,7 @@ function computeState(I) {
   const EWT = I.accuOn ? clamp(I.cv5tempSP, I.lwtSP + 1, GWRT) : GWRT;
   const freeCoolFloor = I.oat + ACCU_APPROACH;                      // best LWT from free cooling alone
   const accuCapTons = I.accuOn ? ACCU_CAP_REF * (1 - ACCU_DERATE * (I.oat - 84.5)) : 0;
-  const dTmech = (accuCapTons * 12000) / (500 * Math.max(coolerFlow, 1)); // ΔT the chiller can pull
+  const dTmech = (accuCapTons * 12000) / (heatF * Math.max(coolerFlow, 1)); // ΔT the chiller can pull (ρ·cp)
   // Compressors engage when free cooling can't reach the LWT setpoint (warm ambient);
   // otherwise free cooling alone holds the floor near ambient.
   const mechRunning = I.accuOn && freeCoolFloor > I.lwtSP + 1;
@@ -158,7 +163,7 @@ function computeState(I) {
   if (!I.accuOn) LWT = I.geoST;                                     // ACCU off → drifts toward ground temp
   else if (mechRunning) LWT = Math.min(freeCoolFloor, Math.max(I.lwtSP, EWT - dTmech)); // sub-ambient OK
   else LWT = Math.max(I.lwtSP, freeCoolFloor);                      // free cooling sufficient
-  const accuTons = (500 * coolerFlow * Math.max(EWT - LWT, 0)) / 12000;
+  const accuTons = (heatF * coolerFlow * Math.max(EWT - LWT, 0)) / 12000;
 
   /* ---- 4. CV-5 SPLIT + BUILDING / BTU-BRANCH TEMPERATURES (per CV-5 convention) ---- */
   const sysFrac = I.accuOn ? sysFracToBuilding(I.cv5) : 0;          // cold ACCU flow fraction to building
@@ -199,9 +204,13 @@ function computeState(I) {
   if (NewDP > 60) alerts.push({ s: "high", t: `New Addition DP ${NewDP.toFixed(1)} psi is high vs the ${I.chwdpSP} psi setpoint.` });
   if (!I.accuOn) alerts.push({ s: "warn", t: `ACCU off — no cooling; LWT rises toward Geo ST (${I.geoST.toFixed(1)}°F).` });
   if (!I.p1on && !I.p2on) alerts.push({ s: "high", t: `No building pump running — GWS flow = 0; no distribution to the building.` });
+  if (I.glycol > 0 && I.oat <= burstF) alerts.push({ s: "high", t: `Burst risk — OA-T ${I.oat.toFixed(0)}°F ≤ burst-protection temp ${burstF.toFixed(0)}°F for ${I.glycol.toFixed(1)}% ${I.glycolType}. Increase glycol.` });
+  else if (I.oat <= freezeF) alerts.push({ s: "high", t: `Freeze risk — OA-T ${I.oat.toFixed(0)}°F ≤ freeze point ${freezeF.toFixed(0)}°F for ${I.glycol.toFixed(1)}% ${I.glycolType}. Increase glycol for freeze/burst protection.` });
+  if (I.glycol >= 35) alerts.push({ s: "warn", t: `High glycol (${I.glycol.toFixed(1)}% ${I.glycolType}) — viscosity ${gp.muRatio.toFixed(1)}× water raises pump head/power and lowers coil heat transfer; use only what the lowest fluid temperature needs.` });
 
   return { GWS, coolerFlow, coolerToSystem, coolerBypass, gwsBypassFlow, NewDP, ExistDP, velocity,
-    LWT, EWT, accuTons, GWST, GWRT, geoRT, BTUflow, BTUsup, BTUret, P1, P2, P3, P4, alerts, bSpeed, mechRunning, sysFrac };
+    LWT, EWT, accuTons, GWST, GWRT, geoRT, BTUflow, BTUsup, BTUret, P1, P2, P3, P4, alerts, bSpeed, mechRunning, sysFrac,
+    heatF, freezeF, burstF, gp };
 }
 
 /* ----------------------------- svg helpers ----------------------------- */
@@ -260,6 +269,17 @@ export default function CwPlantTwin() {
     for (let s = 0; s <= 100; s += 5) { const st = computeState({ ...I, p1: s, p1on: true }); a.push({ s, flow: +st.GWS.toFixed(0), hp: +st.P1.hp.toFixed(1) }); }
     return a;
   }, [I]);
+  const glNow = useMemo(() => glImpacts(I.glycolType, I.glycol), [I.glycolType, I.glycol]);
+  const glCompare = useMemo(() => {
+    const mk = (pct) => { const st = computeState({ ...I, glycol: pct }); const im = glImpacts(I.glycolType, pct);
+      return { pct, freeze: freezePointF(I.glycolType, pct), burst: burstPointF(I.glycolType, pct),
+        flow: st.GWS, hp: st.P1.hp + st.P2.hp, dp: st.NewDP, vel: st.velocity, ...im }; };
+    return { water: mk(0), current: mk(CURRENT_PCT), rec: mk(RECOMMENDED_PCT), now: mk(I.glycol) };
+  }, [I]);
+  const glSweep = useMemo(() => { const a = [];
+    for (let pp = 0; pp <= 50; pp += 2.5) { const st = computeState({ ...I, glycol: pp });
+      a.push({ p: pp, freeze: +freezePointF(I.glycolType, pp).toFixed(1), hp: +(st.P1.hp + st.P2.hp).toFixed(1), flow: +st.GWS.toFixed(0) }); }
+    return a; }, [I]);
   const reset = () => { setI({ ...BASE }); setSelected(null); setLastChange("Reset to capture"); };
 
   /* ---- glyphs ---- */
@@ -316,6 +336,8 @@ export default function CwPlantTwin() {
           <Stat label="EWT" value={f1(D.EWT)} unit="°F" />
           <Stat label="ACCU Duty" value={f1(D.accuTons)} unit="ton" color={C.teal} />
           <Stat label="Velocity" value={f1(D.velocity)} unit="ft/s" color={velColor} />
+          <Stat label="Glycol" value={f1(I.glycol)} unit={`% ${I.glycolType}`} color={C.geo} />
+          <Stat label="Freeze" value={f0(D.freezeF)} unit="°F" color={D.freezeF > I.oat ? C.red : C.blue} />
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
           {lastChange && <span style={{ fontFamily: MONO, fontSize: 11.5, color: C.amber }}>last · {lastChange}</span>}
@@ -471,6 +493,138 @@ export default function CwPlantTwin() {
       {/* ---------------- controls ---------------- */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(300px,1fr))", gap: 12, marginTop: 12 }}>
 
+        {/* ---------- Glycol concentration control — fluid properties & system impacts ---------- */}
+        <Panel icon={Beaker} title="Glycol Concentration (%) — fluid properties & loop impact" span right={
+          <span style={{ display: "flex", gap: 6 }}>
+            {["PG", "EG"].map((g) => (
+              <button key={g} onClick={() => { setI((s) => ({ ...s, glycolType: g })); setLastChange(`Glycol type → ${g}`); }}
+                style={{ cursor: "pointer", borderRadius: 6, padding: "4px 9px", fontSize: 11, fontFamily: MONO, fontWeight: 700,
+                  border: `1px solid ${I.glycolType === g ? C.blue : C.line}`, background: I.glycolType === g ? "#10202c" : C.box, color: I.glycolType === g ? C.blue : C.txt2 }}>
+                {g === "PG" ? "Propylene" : "Ethylene"}
+              </button>
+            ))}
+          </span>
+        }>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(290px, 1fr))", gap: 16, alignItems: "start" }}>
+            <div>
+              <Slider label="Glycol Concentration (%)" value={I.glycol} min={0} max={50} step={0.5} unit={`% ${I.glycolType}`} accent={C.geo}
+                onChange={set("glycol", "Glycol concentration")} note={I.glycolType === "PG" ? "Propylene — non-toxic (school standard)" : "Ethylene — matches the supplied freeze table"} />
+              <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+                {[["Freeze protection", f1(D.freezeF), D.freezeF > I.oat ? C.red : C.blue],
+                  ["Burst protection", f1(D.burstF), C.geo]].map((r, i) => (
+                  <div key={i} style={{ flex: 1, background: C.box, border: `1px solid ${C.line}`, borderRadius: 9, padding: "8px 10px" }}>
+                    <div style={{ fontSize: 10, color: C.dim, textTransform: "uppercase", letterSpacing: 0.5 }}>{r[0]}</div>
+                    <div style={{ fontFamily: MONO, fontSize: 18, fontWeight: 700, color: r[2] }}>{r[1]}<span style={{ fontSize: 10.5, color: C.unit }}> °F</span></div>
+                  </div>
+                ))}
+              </div>
+              <div style={{ display: "flex", gap: 6, marginTop: 10 }}>
+                {[["Water 0%", 0], [`Current ${CURRENT_PCT}%`, CURRENT_PCT], [`Recommended ${RECOMMENDED_PCT}%`, RECOMMENDED_PCT]].map(([lab, v]) => (
+                  <button key={lab} onClick={() => { setI((s) => ({ ...s, glycol: v })); setLastChange(`Glycol → ${v}%`); }}
+                    style={{ flex: 1, cursor: "pointer", borderRadius: 7, padding: "6px 4px", fontSize: 10.5, fontFamily: MONO,
+                      border: `1px solid ${Math.abs(I.glycol - v) < 0.01 ? C.geo : C.line}`, background: Math.abs(I.glycol - v) < 0.01 ? "#1a1530" : C.box, color: Math.abs(I.glycol - v) < 0.01 ? C.geo : C.txt2 }}>{lab}</button>
+                ))}
+              </div>
+              <div style={{ fontSize: 11, color: C.txt2, marginTop: 10, lineHeight: 1.5 }}>
+                Lowering the freeze point from 32°F (water) to ~26°F needs <b style={{ color: C.geo }}>≈ {concForFreeze(I.glycolType, 26).toFixed(1)}% {I.glycolType}</b> (industry curve). 0% reduces the entire loop to the calibrated water baseline.
+              </div>
+            </div>
+            <div>
+              <div style={{ fontSize: 10, letterSpacing: 1, color: C.dim, textTransform: "uppercase", marginBottom: 6 }}>Fluid properties @ ~63°F (Δ vs water)</div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(118px,1fr))", gap: 8 }}>
+                {[["Density", glNow.rho, "lb/ft³", glNow.rhoRatio, 1],
+                  ["Specific heat", glNow.cp, "BTU/lb·°F", glNow.cpRatio, 3],
+                  ["Viscosity", glNow.mu_cP, "cP", glNow.muRatio, 2],
+                  ["Therm. cond.", glNow.k, "BTU/h·ft·°F", glNow.kRatio, 3]].map((r, i) => {
+                  const pctd = (r[3] - 1) * 100; const big = Math.abs(pctd) > 0.05;
+                  return (
+                    <div key={i} style={{ background: C.box, border: `1px solid ${big ? C.geo + "66" : C.line}`, borderRadius: 9, padding: "8px 10px" }}>
+                      <div style={{ fontSize: 10, color: C.dim }}>{r[0]}</div>
+                      <div style={{ fontFamily: MONO, fontSize: 15, fontWeight: 700, color: C.ink }}>{r[1].toFixed(r[4])}<span style={{ fontSize: 9, color: C.unit }}> {r[2]}</span></div>
+                      <div style={{ fontFamily: MONO, fontSize: 11, color: big ? (pctd > 0 ? C.amber : C.teal) : C.dim }}>{big ? `${pctd > 0 ? "▲" : "▼"} ${Math.abs(pctd).toFixed(0)}%` : "—"}</div>
+                    </div>
+                  );
+                })}
+              </div>
+              <div style={{ fontSize: 10, letterSpacing: 1, color: C.dim, textTransform: "uppercase", margin: "12px 0 6px" }}>System impact (Δ vs water @ same controls)</div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(118px,1fr))", gap: 8 }}>
+                {(() => { const w = glCompare.water, n = glCompare.now;
+                  const rows = [["GWS flow", n.flow, "GPM", n.flow / w.flow, false],
+                    ["Pump power", n.hp, "HP", w.hp > 0 ? n.hp / w.hp : 1, true],
+                    ["New-Add DP", n.dp, "psi", w.dp > 0 ? n.dp / w.dp : 1, true],
+                    ["Velocity", n.vel, "ft/s", w.vel > 0 ? n.vel / w.vel : 1, false],
+                    ["Coil HTC", n.coilHTCRatio * 100, "% of water", n.coilHTCRatio, false],
+                    ["Heat transport", n.heatCapRatio * (n.flow / w.flow) * 100, "% of water", n.heatCapRatio * (n.flow / w.flow), false]];
+                  return rows.map((r, i) => { const pctd = (r[3] - 1) * 100; const big = Math.abs(pctd) > 0.05;
+                    const bad = r[4] ? pctd > 0 : pctd < 0; const col = big ? (bad ? C.red : C.teal) : C.dim;
+                    return (
+                      <div key={i} style={{ background: C.box, border: `1px solid ${big ? col + "66" : C.line}`, borderRadius: 9, padding: "8px 10px" }}>
+                        <div style={{ fontSize: 10, color: C.dim }}>{r[0]}</div>
+                        <div style={{ fontFamily: MONO, fontSize: 15, fontWeight: 700, color: C.ink }}>{r[1].toFixed(1)}<span style={{ fontSize: 9, color: C.unit }}> {r[2]}</span></div>
+                        <div style={{ fontFamily: MONO, fontSize: 11, color: col }}>{big ? `${pctd > 0 ? "▲" : "▼"} ${Math.abs(pctd).toFixed(0)}%` : "—"}</div>
+                      </div>
+                    ); });
+                })()}
+              </div>
+            </div>
+          </div>
+
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))", gap: 16, marginTop: 14 }}>
+            <div>
+              <div style={{ fontSize: 10, letterSpacing: 1, color: C.dim, textTransform: "uppercase", marginBottom: 6 }}>Comparison — water · current · recommended · now</div>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: MONO, fontSize: 11.5 }}>
+                <thead><tr>
+                  {["", "Water", `Cur ${CURRENT_PCT}%`, `Rec ${RECOMMENDED_PCT}%`, "Now"].map((h, i) => (
+                    <th key={i} style={{ textAlign: i ? "right" : "left", padding: "4px 6px", color: i === 4 ? C.geo : C.dim, borderBottom: `1px solid ${C.line}` }}>{h}</th>
+                  ))}
+                </tr></thead>
+                <tbody>
+                  {(() => { const { water: w, current: c, rec: rc, now: n } = glCompare;
+                    const rows = [["Freeze °F", w.freeze, c.freeze, rc.freeze, n.freeze, 1],
+                      ["Burst °F", w.burst, c.burst, rc.burst, n.burst, 0],
+                      ["Density ×", w.rhoRatio, c.rhoRatio, rc.rhoRatio, n.rhoRatio, 3],
+                      ["Sp.heat ×", w.cpRatio, c.cpRatio, rc.cpRatio, n.cpRatio, 3],
+                      ["Viscosity ×", w.muRatio, c.muRatio, rc.muRatio, n.muRatio, 2],
+                      ["Cond. ×", w.kRatio, c.kRatio, rc.kRatio, n.kRatio, 3],
+                      ["GWS GPM", w.flow, c.flow, rc.flow, n.flow, 0],
+                      ["Pump HP", w.hp, c.hp, rc.hp, n.hp, 1],
+                      ["New DP psi", w.dp, c.dp, rc.dp, n.dp, 1],
+                      ["Coil HTC ×", w.coilHTCRatio, c.coilHTCRatio, rc.coilHTCRatio, n.coilHTCRatio, 2]];
+                    return rows.map((r, i) => (
+                      <tr key={i} style={{ borderTop: i ? `1px solid ${C.soft}` : "none" }}>
+                        <td style={{ padding: "4px 6px", color: C.lab, fontFamily: SANS }}>{r[0]}</td>
+                        {[1, 2, 3, 4].map((j) => (
+                          <td key={j} style={{ padding: "4px 6px", textAlign: "right", color: j === 4 ? C.geo : C.ink, fontWeight: j === 4 ? 700 : 400 }}>{r[j].toFixed(r[5])}</td>
+                        ))}
+                      </tr>
+                    )); })()}
+                </tbody>
+              </table>
+            </div>
+            <div>
+              <div style={{ fontSize: 10, letterSpacing: 1, color: C.dim, textTransform: "uppercase", marginBottom: 6 }}>Sensitivity — freeze point & pump power vs glycol %</div>
+              <div style={{ height: 200 }}>
+                <ResponsiveContainer>
+                  <LineChart data={glSweep} margin={{ top: 4, right: 6, left: -20, bottom: -6 }}>
+                    <CartesianGrid stroke={C.soft} vertical={false} />
+                    <XAxis dataKey="p" stroke={C.txt2} fontSize={10.5} fontFamily={MONO} tickLine={false} unit="%" />
+                    <YAxis yAxisId="L" stroke={C.blue} fontSize={10.5} fontFamily={MONO} tickLine={false} />
+                    <YAxis yAxisId="R" orientation="right" stroke={C.amber} fontSize={10.5} fontFamily={MONO} tickLine={false} />
+                    <Tooltip contentStyle={{ background: "#0a0e15", border: `1px solid ${C.line}`, borderRadius: 8, fontFamily: MONO, fontSize: 11.5 }} labelFormatter={(v) => `${v}% ${I.glycolType}`} />
+                    <Line yAxisId="L" dataKey="freeze" name="Freeze °F" stroke={C.blue} strokeWidth={2} dot={false} />
+                    <Line yAxisId="R" dataKey="hp" name="Pump HP" stroke={C.amber} strokeWidth={2} dot={false} />
+                    <ReferenceDot yAxisId="L" x={Math.round(I.glycol / 2.5) * 2.5} y={+D.freezeF.toFixed(1)} r={4} fill={C.blue} stroke="#fff" />
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
+              <div style={{ fontFamily: MONO, fontSize: 10, color: C.txt2 }}>blue = freeze point (left, °F) · amber = pump power (right, HP) · dot = current</div>
+            </div>
+          </div>
+          <div style={{ fontSize: 10, color: C.dim, marginTop: 8, lineHeight: 1.5 }}>
+            Model: freeze/burst from ASHRAE/Dow {I.glycolType} curves · properties as ratios to water at the loop temp · friction ∝ ρ⁰·⁸·μ⁰·² · coil h ∝ ρ⁰·⁸·μ⁻⁰·⁴·k⁰·⁶·cp⁰·⁴ (Dittus-Boelter) · heat transport ∝ ρ·cp·flow. Details + assumptions in docs/Glycol_CW_Loop_Engineering.md. Burst temp is approximate — confirm with the glycol supplier's data.
+          </div>
+        </Panel>
+
         <Panel title={selected ? `Editing · ${selected.label}` : "Parameter editor"}>
           {selected?.type === "pump" && (() => {
             const k = selected.id, onK = k + "on", p = D[k.toUpperCase()];
@@ -507,13 +661,11 @@ export default function CwPlantTwin() {
           <Slider label="Outdoor air temp" value={I.oat} min={20} max={100} unit="°F" accent={C.geo} onChange={set("oat", "OA-T")} note="free-cooling floor + air-cooled chiller capacity derate" />
           <Slider label="Geo supply temp" value={I.geoST} min={50} max={85} unit="°F" accent={C.geo} onChange={set("geoST", "Geo ST")} />
           <Slider label="Building load" value={I.bldgTons} min={0} max={120} unit="ton" accent={C.teal} onChange={set("bldgTons", "Building load")} note="geothermal-loop cooling load → drives GWR-T & BTU return" />
-          <div style={{ fontSize: 11, letterSpacing: 1, color: C.dim, textTransform: "uppercase", margin: "10px 0", display: "flex", alignItems: "center", gap: 6 }}><Droplets size={13} /> Pipe & fluid</div>
+          <div style={{ fontSize: 11, letterSpacing: 1, color: C.dim, textTransform: "uppercase", margin: "10px 0", display: "flex", alignItems: "center", gap: 6 }}><Droplets size={13} /> Pipe</div>
           <Slider label="Pipe diameter" value={I.D} min={3} max={14} step={0.5} unit="in" onChange={set("D", "Pipe diameter")} note="ΔP ∝ 1/D⁵ · velocity ∝ 1/D²" />
           <Slider label="Pipe length" value={I.L} min={20} max={400} unit="ft" onChange={set("L", "Pipe length")} />
           <Slider label="Roughness" value={I.rough * 1000} min={0.05} max={2} step={0.05} unit="×10⁻³ ft" onChange={(v) => set("rough", "Pipe roughness")(v / 1000)} />
-          <div style={{ display: "flex", gap: 6, marginTop: 4 }}>
-            {Object.keys(FLUIDS).map((fk) => (<button key={fk} onClick={() => { setI((s) => ({ ...s, fluid: fk })); setLastChange(`Fluid → ${fk}`); }} style={{ flex: 1, cursor: "pointer", borderRadius: 7, padding: "6px 4px", fontSize: 11.5, fontFamily: MONO, border: `1px solid ${I.fluid === fk ? C.blue : C.line}`, background: I.fluid === fk ? "#10202c" : C.box, color: I.fluid === fk ? C.blue : C.txt2 }}>{fk}</button>))}
-          </div>
+          <div style={{ fontSize: 11, color: C.txt2, marginTop: 6 }}>Fluid: <b style={{ color: C.geo }}>{I.glycol > 0 ? `${f1(I.glycol)}% ${I.glycolType} glycol` : "water"}</b> — set concentration in the Glycol panel below.</div>
         </Panel>
 
         <Panel icon={Activity} title="What changed & why">
