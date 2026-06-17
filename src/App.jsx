@@ -1,14 +1,17 @@
 import React, { useState } from "react";
-import { Waves, GitBranch, Info } from "lucide-react";
+import { Waves, GitBranch, Info, Gauge } from "lucide-react";
 import { C, MONO, SANS } from "./theme.js";
 import CwPlantTwin from "./twins/CwPlantTwin.jsx";
 import WshpHydraulicTwin from "./twins/WshpHydraulicTwin.jsx";
+import WestEndControlsTwin from "./twins/WestEndControlsTwin.jsx";
 
 const TABS = [
   { id: "plant", label: "CW / Geo-Exchange Plant", short: "Plant", icon: Waves,
     sub: "Interactive plant twin — pumps, valves, ACCU free-cooling, temperatures & flows" },
   { id: "wshp", label: "WSHP Distribution Network", short: "Hydraulic", icon: GitBranch,
     sub: "Design-basis hydraulic twin — pipe sizing, velocity & head-loss across the riser" },
+  { id: "westend", label: "West End · Cafeteria Controls", short: "West End", icon: Gauge,
+    sub: "Design-basis controls snapshot — WSHP/DOAS/VRF points, setpoints & provenance (DCAM-22-CS-RFP-0009)" },
 ];
 
 export default function App() {
@@ -32,7 +35,7 @@ export default function App() {
             </div>
             <div>
               <div style={{ fontSize: 14.5, fontWeight: 700, lineHeight: 1.1 }}>Stoddert ES · Geo-Exchange Twins</div>
-              <div style={{ fontSize: 10.5, color: C.dim, fontFamily: MONO, letterSpacing: 1 }}>DG-22-S002 · digital twin suite</div>
+              <div style={{ fontSize: 10.5, color: C.dim, fontFamily: MONO, letterSpacing: 1 }}>DG-22-S002 (East) · DCAM-22-CS-RFP-0009 (West)</div>
             </div>
           </div>
 
@@ -63,7 +66,8 @@ export default function App() {
 
       <main style={{ maxWidth: 1380, margin: "0 auto" }}>
         <section hidden={tab !== "plant"}><CwPlantTwin /></section>
-        <section hidden={tab === "plant"}><WshpHydraulicTwin /></section>
+        <section hidden={tab !== "wshp"}><WshpHydraulicTwin /></section>
+        <section hidden={tab !== "westend"}><WestEndControlsTwin /></section>
       </main>
 
       <style>{`
