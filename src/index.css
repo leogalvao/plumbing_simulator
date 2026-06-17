@@ -1,0 +1,7 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Flow-animation keyframes for the West End CW loop SVG twin. */
+@keyframes cwflow { to { stroke-dashoffset: -18; } }
+@keyframes cwspin { to { transform: rotate(360deg); } }
