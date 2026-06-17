@@ -116,7 +116,8 @@ function answer(q, R, S) {
   }
   if (/pump|vfd|efficient/.test(t))
     return `Illustrative (no curves yet): building pump ${S.vfdBldg}% → ${f1(R.pBldg.gpm)} GPM @ ~${f0(R.pBldg.H)} ft, ${f1(R.pBldg.bhp)} BHP; geo pump ${S.vfdGeo}% → ${f1(R.pGeo.gpm)} GPM, ${f1(R.pGeo.bhp)} BHP. Power ∝ speed³ — trim VFD to the lowest speed holding ≥ design ΔP. Provide P-1…P-4 curves to size the real operating point.`;
-  const b = find("wshp-") || (t.match(/(\d-\d)/) && find(t.match(/(\d-\d)/)[1]));
+  const branchMatch = t.match(/\b(?:wshp-)?(\d-\d)\b/);
+  const b = branchMatch ? find(branchMatch[1]) : (/branch/.test(t) ? find("wshp-") : null);
   if (b && /why|under|low|branch/.test(t))
     return `${b.id}: ${b.d}" @ ${f1(b.gpm)} GPM = ${f1(b.v)} ft/s.${b.v < 2 ? " Low velocity — branch may be oversized or starved; check balancing valve & upstream ΔP." : " Velocity normal; if underperforming, suspect ΔP/balancing, not pipe size."}`;
   return `Try: "highest head loss", "highest velocity", "reduce 8 to 6", "support 10 more units", "why is 2-6 low", "most efficient pump". (Answers are computed from the model; pump/energy/NPSH illustrative pending curves & Cx data.)`;
@@ -128,9 +129,10 @@ export default function WshpHydraulicTwin() {
   const [sel, setSel] = useState(null);
   const [last, setLast] = useState(null);
   const [q, setQ] = useState("");
-  const [ans, setAns] = useState("");
+  const [submittedQ, setSubmittedQ] = useState("");
   const set = (k, lbl) => (v) => { setS((p) => ({ ...p, [k]: v })); if (lbl) setLast(lbl); };
   const R = useMemo(() => compute(S), [S]);
+  const ans = useMemo(() => (submittedQ ? answer(submittedQ, R, S) : ""), [submittedQ, R, S]);
   const selSeg = sel ? R.segs.find((s) => s.id === sel) : null;
 
   const prev = useRef(R);
@@ -150,8 +152,8 @@ export default function WshpHydraulicTwin() {
     return a;
   }, [selSeg]);
 
-  const reset = () => { setS({ ...BASE, dia: {} }); setSel(null); setLast("Reset"); setAns(""); };
-  const runQ = (text) => { const r = answer(text, R, S); setAns(r); };
+  const reset = () => { setS({ ...BASE, dia: {} }); setSel(null); setLast("Reset"); setSubmittedQ(""); };
+  const runQ = (text) => { setSubmittedQ(text); };
 
   // diameter editing now writes to state.dia (so Reset restores it) instead of mutating module constants
   const setDiameter = (id, v) => { setLast(`${id} → ${v}"`); setS((s) => ({ ...s, dia: { ...s.dia, [id]: v } })); };
