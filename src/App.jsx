@@ -1,9 +1,10 @@
 import React, { useState } from "react";
-import { Waves, GitBranch, Info, Gauge } from "lucide-react";
+import { Waves, GitBranch, Info, Gauge, Network } from "lucide-react";
 import { C, MONO, SANS } from "./theme.js";
 import CwPlantTwin from "./twins/CwPlantTwin.jsx";
 import WshpHydraulicTwin from "./twins/WshpHydraulicTwin.jsx";
 import WestEndControlsTwin from "./twins/WestEndControlsTwin.jsx";
+import WestEndCwLoopTwin from "./twins/WestEndCwLoopTwin";
 
 const TABS = [
   { id: "plant", label: "CW / Geo-Exchange Plant", short: "Plant", icon: Waves,
@@ -12,6 +13,8 @@ const TABS = [
     sub: "Design-basis hydraulic twin — pipe sizing, velocity & head-loss across the riser" },
   { id: "westend", label: "West End · Cafeteria Controls", short: "West End", icon: Gauge,
     sub: "Design-basis controls snapshot — WSHP/DOAS/VRF points, setpoints & provenance (DCAM-22-CS-RFP-0009)" },
+  { id: "cwloop", label: "West End · CW Loop Twin", short: "CW Loop", icon: Network,
+    sub: "Interactive cafeteria condenser-water digital twin — piping map, glycol, flow/heat/pressure, per-unit HP & refrigeration" },
 ];
 
 export default function App() {
@@ -68,6 +71,7 @@ export default function App() {
         <section hidden={tab !== "plant"}><CwPlantTwin /></section>
         <section hidden={tab !== "wshp"}><WshpHydraulicTwin /></section>
         <section hidden={tab !== "westend"}><WestEndControlsTwin /></section>
+        <section hidden={tab !== "cwloop"}><WestEndCwLoopTwin /></section>
       </main>
 
       <style>{`
