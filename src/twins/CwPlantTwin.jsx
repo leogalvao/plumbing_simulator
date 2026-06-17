@@ -74,15 +74,18 @@ function computeState(I) {
   const BTUsup = 63.4 + 0.6 * (GWST - 72.0) + 0.4 * (LWT - 56.8) * sysFrac;
   const BTUret = BTUsup + (500 * 113.1 * 7.3) / (500 * Math.max(BTUflow, 1));
 
-  function pump(s, on, Hn, Qsh) {
-    if (!on || s <= 0) return { head: 0, hp: 0, q: 0 };
-    const H = Hn * Math.pow(s / 100, 2), q = Qsh * (s / 100);
+  function pump(s, on, Hn, q) {
+    if (!on || s <= 0 || q <= 0) return { head: 0, hp: 0, q: 0 };
+    const H = Hn * Math.pow(s / 100, 2);
     return { head: H, hp: (q * H * (rho / 62.4)) / (3960 * 0.75), q };
   }
-  const P1 = pump(I.p1, I.p1on, 120, GWS / Math.max(I.p1 / 100, 0.01));
-  const P2 = pump(I.p2, I.p2on, 120, 900);
-  const P3 = pump(I.p3, I.p3on, 95, coolerFlow / 2 / Math.max(I.p3 / 100, 0.01));
-  const P4 = pump(I.p4, I.p4on, 95, coolerFlow / 2 / Math.max(I.p4 / 100, 0.01));
+  // Allocate total loop flow across only the running parallel pumps (by speed share),
+  // so a single running pump carries the full flow instead of a hard-coded 50/50 split.
+  const share = (s, on, total) => (on && total > 0 ? s / total : 0);
+  const P1 = pump(I.p1, I.p1on, 120, GWS * share(I.p1, I.p1on, bSpeed));
+  const P2 = pump(I.p2, I.p2on, 120, GWS * share(I.p2, I.p2on, bSpeed));
+  const P3 = pump(I.p3, I.p3on, 95, coolerFlow * share(I.p3, I.p3on, geoSpeed));
+  const P4 = pump(I.p4, I.p4on, 95, coolerFlow * share(I.p4, I.p4on, geoSpeed));
 
   const alerts = [];
   if (LWT > I.lwtSP + 2) alerts.push({ s: "info", t: `LWT ${LWT.toFixed(1)}°F can't reach the ${I.lwtSP}°F setpoint — free-cooling floor ≈ ambient (${I.oat.toFixed(0)}°F + ~1° approach).` });
