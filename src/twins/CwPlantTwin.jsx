@@ -2,216 +2,28 @@ import React, { useState, useMemo, useRef, useEffect } from "react";
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceDot,
 } from "recharts";
-import { AlertTriangle, RotateCcw, Zap, Droplets, Thermometer, Activity, Beaker } from "lucide-react";
+import { AlertTriangle, RotateCcw, Zap, Droplets, Thermometer, Activity, Beaker, Target } from "lucide-react";
 import { C, MONO, SANS, clamp, f1, f0 } from "../theme.js";
 import { Slider, Toggle, Panel, Stat, InfoDot } from "../components.jsx";
-import { freezePointF, burstPointF, concForFreeze, props as glProps, impacts as glImpacts, CURRENT_PCT, RECOMMENDED_PCT } from "../glycol.js";
+import { freezePointF, burstPointF, concForFreeze, impacts as glImpacts, CURRENT_PCT, RECOMMENDED_PCT } from "../glycol.js";
+import { computeState, BASE, CAPTURE, buildComparison, CONSTANTS, wetBulbF } from "./cwPlantModel.js";
 
 /* ========================================================================== *
  *  Stoddert ES — CW / Geo-Exchange Plant · Interactive Digital Twin           *
- *  Reduced-order RELATIONAL model, CALIBRATED to a real enteliWEB capture.    *
- *  Layout matched to the 2025-11-21 enteliWEB graphic.                        *
+ *  SCADA view over the reduced-order RELATIONAL model in ./cwPlantModel.js,    *
+ *  calibrated to the 2025-11-21 enteliWEB capture. The model is PURE and is    *
+ *  validated head-less by cwPlantModel.test.mjs (Real vs Sim vs Variance);     *
+ *  it owns every equation/constant — this file is presentation + interaction.  *
  *                                                                            *
- *  ── CALIBRATION ANCHOR (real enteliWEB capture, 2025-11-21) ──             *
- *    Controls : P1=100%  P2=off  P3=65%  P4=100%  CV-5=25.3%                  *
- *               CV-1-1=0%  CV-1-2=0%  CHWDP-SP=6.0 psi  OA-T=84.5°F           *
- *    Plant    : GWS 661 GPM · GWS-T 81.7°F · GWR-T 84.7°F                     *
- *               LWT 60.8°F · EWT 75.0°F · Geo ST 83.4 / Geo RT 84.9°F         *
- *               New-Addition DP 31.7 psi · Existing-Bldg DP 5.2 psi           *
- *               BTU 66.8°F / 100.8 GPM / 74.6°F                               *
- *    These values are reproduced by `BASE` ("Reset to capture") within        *
- *    ~10% on flow/DP and ~2°F on temperatures.                                *
- *                                                                            *
- *  ── METHOD / ASSUMPTIONS ──                                                 *
- *   1. HYDRAULICS — the pump curve  H(n,Q) = n²·H0 − a·Q²  is intersected     *
- *      with a quadratic system curve  H(Q) = R·Q².  H0, a and R are anchored  *
- *      so that at full speed, design geometry and the wellfield bypass shut,  *
- *      P1=100% lands the duty point at Q_DESIGN = 661 GPM.  Pump affinity is  *
- *      preserved EXACTLY (Q∝N, H∝N², P∝N³): with R·Q² as the system curve the *
- *      intersection gives Q = N·√(H0/(a+R)), i.e. flow is linear in speed.    *
- *      Pipe D/L/roughness/fluid scale the effective resistance R (so ΔP and   *
- *      flow track geometry); opening the wellfield bypass (CV-1-1/CV-1-2)     *
- *      adds a parallel path that LOWERS R.  Differential pressures are        *
- *      anchored to the capture and scale with Q² and the same resistance.     *
- *   2. ACCU THERMAL — EQ-ACCU-1 is an AIR-COOLED HEAT-PUMP CHILLER (fans/     *
- *      compressors C1–C4).  Free cooling (LWT ≈ ambient + approach) is ONLY   *
- *      the floor when the compressors are off.  When mechanical cooling runs  *
- *      it pulls LWT *below ambient* toward ACCU-1-LWT-SP, limited by chiller  *
- *      capacity (derates as OA-T rises) and ACCU flow (P3/P4).  CV-5 holds    *
- *      the entering-chiller temp (TS-2 = EWT) at ACCU-CV5-TEMP-SP (≈75°F).    *
- *   3. CV-5 CONVENTION — see CV5_PCT_IS_BYPASS below (single source of truth).*
- *   4. OA-H (outdoor humidity) is DISPLAY-ONLY.  An air-cooled plant's water  *
- *      temperatures are a dry-bulb (OA-T) phenomenon, so OA-H does not feed   *
- *      any calc; it is shown for context only (see the parameters panel).     *
+ *  Topology (full derivation in the model header):                            *
+ *    • GWS Flow (geo / ground loop) is driven by the geo pumps P3 + P4 —       *
+ *      throttling P3 (lead/lag) lowers GWS; that is how the plant holds 671    *
+ *      GPM with P4 at 100%.                                                    *
+ *    • Building flow / New-Add DP / Existing DP / BTU branch are driven by the *
+ *      primary VS pumps P1 + P2 (parallel, lead/standby — P2 Off ⇒ dead leg). *
+ *    • CV-1-1/CV-1-2 DIVERT flow around the wellfield (not an additive path).  *
+ *    • LWT is ambient WET-BULB driven (OA-T + OA-H); EWT = LWT + ACCU loop ΔT. *
  * ========================================================================== */
-
-/* ----------------------------- physics ----------------------------- */
-function muWater_cP(tF) { const T = ((tF - 32) * 5) / 9 + 273.15; return 2.414e-2 * Math.pow(10, 247.8 / (T - 140)); }
-function frictionFactor(Re, rr) { if (Re < 2300) return 64 / Math.max(Re, 1); const x = rr / 3.7 + 5.74 / Math.pow(Re, 0.9); return 0.25 / Math.pow(Math.log10(x), 2); }
-function segHyd(Q, D_in, L, rough, rho, tF) {
-  const Qcfs = Q * 0.002228, Dft = D_in / 12, A = (Math.PI / 4) * Dft * Dft;
-  const v = Qcfs / Math.max(A, 1e-6), mu = muWater_cP(tF) * 6.7197e-4;
-  const Re = (rho * v * Dft) / Math.max(mu, 1e-9), f = frictionFactor(Re, rough / Dft);
-  return { dP: (f * (L / Dft) * rho * v * v) / 2 / 144, v, Re };
-}
-/* Fluid properties now come from ../glycol.js (continuous glycol model; 0% = water). */
-
-/* --------------------------------------------------------------------------
- *  CV-5 CONVENTION — SINGLE SOURCE OF TRUTH.
- *  CV-5 (a.k.a. CV-4 in the M503 SOO §7.1) is the ACCU/chiller DIVERTING valve
- *  that holds entering-chiller-water temp (TS-2 = EWT) at ACCU-CV5-TEMP-SP
- *  (≈75°F).  Two readings of its position were in conflict (see the in-app
- *  banner note and SOO FLAG-B / coverage_report "CV-5 / both pipe cycles"):
- *      (a) "% cooled flow to building"   → sysFrac = CV-5 / 100
- *      (b) "% bypass" / "0% = full bypass"→ sysFrac = 1 − CV-5 / 100
- *  The 2025-11-21 capture FORCES (b): at CV-5 = 25.3% the building supply is
- *  66.8°F, i.e. mostly COLD ACCU water (LWT 60.8°F) blended with warm return
- *  (GWR-T 84.7°F).  That requires ~75% of the cooled flow to reach the
- *  building, so the 25.3% reading is the BYPASS port — convention (b).
- *
- *  >>> THIS MUST MATCH THE PLANT SEQUENCE OF OPERATIONS (M503 diagram 09 /
- *      valve schedule, still open as FLAG-B). If the SOO defines CV-5 the
- *      other way, flip the single flag below — every downstream calc (BTU
- *      supply temp, building-DP coupling, LWT/EWT coupling, ACCU to-system vs
- *      bypass split, and the CV-5 alert) reads `sysFracToBuilding()` and will
- *      follow automatically. NOTE: (b) intentionally contradicts the raw
- *      on-screen SCADA label "0% Full By-Pass"; the real data wins until the
- *      SOO confirms otherwise.
- * ------------------------------------------------------------------------- */
-const CV5_PCT_IS_BYPASS = true; // ← flip to false if the SOO defines CV-5 as "% to system"
-const sysFracToBuilding = (cv5) => CV5_PCT_IS_BYPASS ? clamp(1 - cv5 / 100, 0, 1) : clamp(cv5 / 100, 0, 1);
-
-/* --------------------------------------------------------------------------
- *  CALIBRATION CONSTANTS — all anchored to the 2025-11-21 duty point above.
- * ------------------------------------------------------------------------- */
-const Q_DESIGN = 661;          // GPM at P1=100%, design geometry, wellfield bypass shut
-const H0_P1 = 120;             // ft  — P1/P2 shut-off head at 100% speed
-const H_DUTY = 60;             // ft  — head where pump & system curves cross at design duty
-const A_PUMP = (H0_P1 - H_DUTY) / (Q_DESIGN * Q_DESIGN); // pump-curve droop coeff (ft/GPM²)
-const R0_SYS = H_DUTY / (Q_DESIGN * Q_DESIGN);           // base system resistance (ft/GPM²)
-const H0_P34 = 95;             // ft  — P3/P4 shut-off head at 100% speed
-const NEWDP_REF = 31.7;        // psi — New-Addition DP at the duty point
-const EXISTDP_REF = 5.2;       // psi — Existing-Building DP at the duty point
-const GWS_SUPPLY_OFFSET = 1.7; // °F  — GWS-T below Geo ST
-const ACCU_APPROACH = 1.2;     // °F  — free-cooling approach to ambient (compressors off)
-const ACCU_CAP_REF = 59.17;    // ton — mechanical cooling available at the 84.5°F anchor
-const ACCU_DERATE = 0.006;     // /°F — air-cooled capacity derate as OA-T rises above anchor
-const ACCU_FLOW_REF = 100;     // GPM — ACCU (P3/P4) flow at the anchor speed
-const ACCU_SPEED_REF = 165;    // %   — P3+P4 combined speed at the anchor (65 + 100)
-const BTU_FLOW_REF = 100.8;    // GPM — metered building-branch flow at the duty point
-const BTU_DT_REF = 7.8;        // °F  — BTU return − supply at the duty point
-const ENV_GWS_LOW = 400;       // GPM — normal-envelope floor
-const ENV_GWS_HIGH = 950;      // GPM — normal-envelope ceiling
-
-const BASE = {
-  // "Reset to capture" → the 2025-11-21 enteliWEB reference operating point.
-  p1: 100, p2: 0, p3: 65, p4: 100, p1on: true, p2on: false, p3on: true, p4on: true,
-  cv5: 25.3, cv3: 0, cv11: 0, cv12: 0,
-  oat: 84.5, oah: 53.0 /* display-only */, geoST: 83.4, bldgTons: 82.6,
-  D: 8, L: 100, rough: 0.00015, glycol: 0, glycolType: "PG", accuOn: true,
-  lwtSP: 44, chwdpSP: 6.0, cv5tempSP: 75,
-};
-
-function computeState(I) {
-  const loopT = 63;
-  const gp = glProps(I.glycolType, I.glycol, loopT);   // glycol fluid props (ratios vs water; 0% = water)
-  const rho = gp.rho, muMul = gp.muRatio;
-  const heatF = 500 * gp.rhoRatio * gp.cpRatio;        // ρ·cp heat-transport factor (500 = water baseline)
-  const freezeF = freezePointF(I.glycolType, I.glycol);
-  const burstF = burstPointF(I.glycolType, I.glycol);
-
-  /* ---- 1. HYDRAULICS — pump curve ∩ quadratic system curve (affinity-exact) ---- */
-  const bSpeed = (I.p1on ? I.p1 : 0) + (I.p2on ? I.p2 : 0);          // combined building-pump speed %
-  const bypassAvg = (I.cv11 + I.cv12) / 2;                          // wellfield bypass valve avg position
-  // Effective system resistance R = R0 · (geometry / fluid / bypass factors). At design
-  // geometry (D=8, L=100, water) with the wellfield bypass shut, the factor is 1.0.
-  const segDesign = segHyd(Q_DESIGN, BASE.D, BASE.L, BASE.rough, 62.3, loopT);
-  const segGeom = segHyd(Q_DESIGN, I.D, I.L, I.rough, rho, loopT);
-  let lossMul = (segGeom.dP / Math.max(segDesign.dP, 1e-9)) * Math.pow(muMul, 0.5);
-  lossMul *= 1 - 0.12 * (bypassAvg / 100);                          // opening bypass lowers resistance
-  const Rsys = R0_SYS * Math.max(lossMul, 1e-3);
-  // Pump ∩ system: n²·H0 − a·Q² = Rsys·Q²  ⇒  Q = N · √(H0/(a+Rsys))  (Q ∝ N, exactly).
-  const GWS = (bSpeed / 100) * Math.sqrt(H0_P1 / (A_PUMP + Rsys));
-
-  const geoSpeed = (I.p3on ? I.p3 : 0) + (I.p4on ? I.p4 : 0);        // combined ACCU-pump speed %
-  const coolerFlow = ACCU_FLOW_REF * (geoSpeed / ACCU_SPEED_REF) * Math.pow(I.D / BASE.D, 2);
-  const gwsBypassFlow = GWS * (bypassAvg / 100) * 0.45;             // flow routed through the wellfield bypass
-
-  // Differential pressures: anchored to the capture, scaling with flow² and resistance.
-  const velocity = segHyd(GWS, I.D, I.L, I.rough, rho, loopT).v;
-  const dpScale = Math.pow(GWS / Q_DESIGN, 2) * Math.max(lossMul, 1e-3) * Math.pow(muMul, 0.25);
-  const NewDP = NEWDP_REF * dpScale;
-  const ExistDP = EXISTDP_REF * dpScale;
-
-  /* ---- 2. LOOP / GEOTHERMAL TEMPERATURES ---- */
-  const GWST = I.geoST - GWS_SUPPLY_OFFSET;                          // GWS supply temp (geothermal loop)
-  const bldgBtu = I.bldgTons * 12000;
-  const GWRT = GWST + bldgBtu / (heatF * Math.max(GWS, 1));          // loop return rises with load / falls with flow (ρ·cp)
-  const geoRT = I.geoST + (GWRT - GWST) / 2;                         // ground return warmer than supply (cooling)
-
-  /* ---- 3. ACCU THERMAL — free-cooling floor + mechanical (compressor) cooling ---- */
-  // CV-5 (chiller diverting valve) holds entering-chiller temp at its setpoint, capped by
-  // the loop return (can't be warmer than what returns) and floored above LWT-SP.
-  const EWT = I.accuOn ? clamp(I.cv5tempSP, I.lwtSP + 1, GWRT) : GWRT;
-  const freeCoolFloor = I.oat + ACCU_APPROACH;                      // best LWT from free cooling alone
-  const accuCapTons = I.accuOn ? ACCU_CAP_REF * (1 - ACCU_DERATE * (I.oat - 84.5)) : 0;
-  const dTmech = (accuCapTons * 12000) / (heatF * Math.max(coolerFlow, 1)); // ΔT the chiller can pull (ρ·cp)
-  // Compressors engage when free cooling can't reach the LWT setpoint (warm ambient);
-  // otherwise free cooling alone holds the floor near ambient.
-  const mechRunning = I.accuOn && freeCoolFloor > I.lwtSP + 1;
-  let LWT;
-  if (!I.accuOn) LWT = I.geoST;                                     // ACCU off → drifts toward ground temp
-  else if (mechRunning) LWT = Math.min(freeCoolFloor, Math.max(I.lwtSP, EWT - dTmech)); // sub-ambient OK
-  else LWT = Math.max(I.lwtSP, freeCoolFloor);                      // free cooling sufficient
-  const accuTons = (heatF * coolerFlow * Math.max(EWT - LWT, 0)) / 12000;
-
-  /* ---- 4. CV-5 SPLIT + BUILDING / BTU-BRANCH TEMPERATURES (per CV-5 convention) ---- */
-  const sysFrac = I.accuOn ? sysFracToBuilding(I.cv5) : 0;          // cold ACCU flow fraction to building
-  const coolerToSystem = coolerFlow * sysFrac;
-  const coolerBypass = coolerFlow * (1 - sysFrac);
-
-  const BTUflow = GWS * (BTU_FLOW_REF / Q_DESIGN) * (1 + 0.2 * I.cv3 / 100);
-  // Building supply = warm loop return blended with cold ACCU water, weighted by CV-5 split.
-  const BTUsup = GWRT - sysFrac * (GWRT - LWT);
-  const BTUret = BTUsup + BTU_DT_REF * (I.bldgTons / BASE.bldgTons) * (BTU_FLOW_REF / Math.max(BTUflow, 1));
-
-  /* ---- 5. PUMPS — affinity display (H ∝ N², P ∝ N³) ---- */
-  function pump(s, on, Hn, q) {
-    if (!on || s <= 0 || q <= 0) return { head: 0, hp: 0, q: 0 };
-    const H = Hn * Math.pow(s / 100, 2);
-    return { head: H, hp: (q * H * (rho / 62.4)) / (3960 * 0.75), q };
-  }
-  // Allocate total loop flow across only the running parallel pumps (by speed share),
-  // so a single running pump carries the full flow instead of a hard-coded 50/50 split.
-  const share = (s, on, total) => (on && total > 0 ? s / total : 0);
-  const P1 = pump(I.p1, I.p1on, H0_P1, GWS * share(I.p1, I.p1on, bSpeed));
-  const P2 = pump(I.p2, I.p2on, H0_P1, GWS * share(I.p2, I.p2on, bSpeed));
-  const P3 = pump(I.p3, I.p3on, H0_P34, coolerFlow * share(I.p3, I.p3on, geoSpeed));
-  const P4 = pump(I.p4, I.p4on, H0_P34, coolerFlow * share(I.p4, I.p4on, geoSpeed));
-
-  /* ---- 6. ENVELOPE ALERTS ---- */
-  const alerts = [];
-  if (I.accuOn && mechRunning && LWT > I.lwtSP + 2)
-    alerts.push({ s: "info", t: `ACCU mechanical cooling at capacity — LWT ${LWT.toFixed(1)}°F can't reach the ${I.lwtSP}°F setpoint (chiller capacity/flow limited at OA-T ${I.oat.toFixed(0)}°F). Raise ACCU flow (P3/P4) or shed load to pull LWT down.` });
-  if (I.accuOn && !mechRunning)
-    alerts.push({ s: "info", t: `Free-cooling mode — OA-T ${I.oat.toFixed(0)}°F is cold enough that LWT (${LWT.toFixed(1)}°F) holds without compressors.` });
-  if (I.accuOn && sysFrac < 0.02)
-    alerts.push({ s: "info", t: `CV-5 ${I.cv5.toFixed(0)}% — cooled ACCU water is fully bypassing the building (recirculating); building runs on ground-loop water.` });
-  if (velocity > 8) alerts.push({ s: "high", t: `Pipe velocity ${velocity.toFixed(1)} ft/s exceeds ~8 ft/s — erosion/noise risk. Increase diameter or reduce flow.` });
-  if (velocity < 2 && GWS > 50) alerts.push({ s: "warn", t: `Pipe velocity ${velocity.toFixed(1)} ft/s is low (<2 ft/s) — fouling risk.` });
-  if (GWS > ENV_GWS_HIGH) alerts.push({ s: "high", t: `GWS flow ${GWS.toFixed(0)} GPM is above the normal envelope (~${ENV_GWS_LOW}–${ENV_GWS_HIGH} GPM).` });
-  if (GWS > 50 && GWS < ENV_GWS_LOW) alerts.push({ s: "warn", t: `GWS flow ${GWS.toFixed(0)} GPM is below the normal envelope (~${ENV_GWS_LOW}–${ENV_GWS_HIGH} GPM).` });
-  if (NewDP > 60) alerts.push({ s: "high", t: `New Addition DP ${NewDP.toFixed(1)} psi is high vs the ${I.chwdpSP} psi setpoint.` });
-  if (!I.accuOn) alerts.push({ s: "warn", t: `ACCU off — no cooling; LWT rises toward Geo ST (${I.geoST.toFixed(1)}°F).` });
-  if (!I.p1on && !I.p2on) alerts.push({ s: "high", t: `No building pump running — GWS flow = 0; no distribution to the building.` });
-  if (I.glycol > 0 && I.oat <= burstF) alerts.push({ s: "high", t: `Burst risk — OA-T ${I.oat.toFixed(0)}°F ≤ burst-protection temp ${burstF.toFixed(0)}°F for ${I.glycol.toFixed(1)}% ${I.glycolType}. Increase glycol.` });
-  else if (I.oat <= freezeF) alerts.push({ s: "high", t: `Freeze risk — OA-T ${I.oat.toFixed(0)}°F ≤ freeze point ${freezeF.toFixed(0)}°F for ${I.glycol.toFixed(1)}% ${I.glycolType}. Increase glycol for freeze/burst protection.` });
-  if (I.glycol >= 35) alerts.push({ s: "warn", t: `High glycol (${I.glycol.toFixed(1)}% ${I.glycolType}) — viscosity ${gp.muRatio.toFixed(1)}× water raises pump head/power and lowers coil heat transfer; use only what the lowest fluid temperature needs.` });
-
-  return { GWS, coolerFlow, coolerToSystem, coolerBypass, gwsBypassFlow, NewDP, ExistDP, velocity,
-    LWT, EWT, accuTons, GWST, GWRT, geoRT, BTUflow, BTUsup, BTUret, P1, P2, P3, P4, alerts, bSpeed, mechRunning, sysFrac,
-    heatF, freezeF, burstF, gp };
-}
 
 /* ----------------------------- svg helpers ----------------------------- */
 function Pipe({ pts, flow, color, dir = 1, minW = 3.5 }) {
@@ -256,7 +68,7 @@ export default function CwPlantTwin() {
   const [sens, setSens] = useState([]);
   useEffect(() => {
     const p = prev.current;
-    const fields = [["GWS Flow", "GWS", "GPM"], ["LWT", "LWT", "°F"], ["EWT", "EWT", "°F"], ["New Add. DP", "NewDP", "psi"],
+    const fields = [["GWS Flow", "GWS", "GPM"], ["Bldg flow", "bldgFlow", "GPM"], ["LWT", "LWT", "°F"], ["EWT", "EWT", "°F"], ["New Add. DP", "NewDP", "psi"],
     ["ACCU duty", "accuTons", "ton"], ["Pipe velocity", "velocity", "ft/s"], ["GWS supply T", "GWST", "°F"], ["BTU flow", "BTUflow", "GPM"]];
     const list = fields.map(([lab, k, u]) => ({ lab, u, from: p[k], to: D[k], d: D[k] - p[k] }))
       .filter((x) => Math.abs(x.d) > 1e-3).sort((a, b) => Math.abs(b.d / (Math.abs(b.from) || 1)) - Math.abs(a.d / (Math.abs(a.from) || 1)));
@@ -264,9 +76,10 @@ export default function CwPlantTwin() {
     setSens(list.slice(0, 6)); prev.current = D;
   }, [D]);
 
+  // P1 response curve: building flow & P1 power vs P1 speed (GWS is geo-pump driven).
   const sweep = useMemo(() => {
     const a = [];
-    for (let s = 0; s <= 100; s += 5) { const st = computeState({ ...I, p1: s, p1on: true }); a.push({ s, flow: +st.GWS.toFixed(0), hp: +st.P1.hp.toFixed(1) }); }
+    for (let s = 0; s <= 100; s += 5) { const st = computeState({ ...I, p1: s, p1on: true }); a.push({ s, flow: +st.bldgFlow.toFixed(0), hp: +st.P1.hp.toFixed(1) }); }
     return a;
   }, [I]);
   const glNow = useMemo(() => glImpacts(I.glycolType, I.glycol), [I.glycolType, I.glycol]);
@@ -280,6 +93,10 @@ export default function CwPlantTwin() {
     for (let pp = 0; pp <= 50; pp += 2.5) { const st = computeState({ ...I, glycol: pp });
       a.push({ p: pp, freeze: +freezePointF(I.glycolType, pp).toFixed(1), hp: +(st.P1.hp + st.P2.hp).toFixed(1), flow: +st.GWS.toFixed(0) }); }
     return a; }, [I]);
+  const cmp = useMemo(() => buildComparison(I), [I]);
+  const atCapture = useMemo(() => Object.keys(BASE).every((k) => I[k] === BASE[k]), [I]);
+
+  const loadCapture = () => { setI({ ...BASE }); setSelected(null); setLastChange("Loaded 2025-11-21 capture"); };
   const reset = () => { setI({ ...BASE }); setSelected(null); setLastChange("Reset to capture"); };
 
   /* ---- glyphs ---- */
@@ -332,22 +149,23 @@ export default function CwPlantTwin() {
       <div style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center", justifyContent: "space-between" }}>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           <Stat label="GWS Flow" value={f0(D.GWS)} unit="GPM" color={C.blue} />
+          <Stat label="Bldg Flow" value={f0(D.bldgFlow)} unit="GPM" color={C.teal} />
           <Stat label="LWT" value={f1(D.LWT)} unit="°F" />
           <Stat label="EWT" value={f1(D.EWT)} unit="°F" />
           <Stat label="ACCU Duty" value={f1(D.accuTons)} unit="ton" color={C.teal} />
           <Stat label="Velocity" value={f1(D.velocity)} unit="ft/s" color={velColor} />
-          <Stat label="Glycol" value={f1(I.glycol)} unit={`% ${I.glycolType}`} color={C.geo} />
-          <Stat label="Freeze" value={f0(D.freezeF)} unit="°F" color={D.freezeF > I.oat ? C.red : C.blue} />
+          <Stat label="Wet-bulb" value={f1(D.twb)} unit="°F" color={C.geo} />
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
           {lastChange && <span style={{ fontFamily: MONO, fontSize: 11.5, color: C.amber }}>last · {lastChange}</span>}
+          <button onClick={loadCapture} style={{ display: "inline-flex", alignItems: "center", gap: 6, cursor: "pointer", background: atCapture ? "#10202c" : C.box, border: `1px solid ${atCapture ? C.blue : C.line}`, color: atCapture ? C.blue : C.txt2, borderRadius: 7, padding: "7px 12px", fontSize: 12.5, fontFamily: SANS }}><Target size={13} /> Load 2025-11-21 capture</button>
           <button onClick={reset} style={{ display: "inline-flex", alignItems: "center", gap: 6, cursor: "pointer", background: C.box, border: `1px solid ${C.line}`, color: C.txt2, borderRadius: 7, padding: "7px 12px", fontSize: 12.5, fontFamily: SANS }}><RotateCcw size={13} /> Reset to capture</button>
         </div>
       </div>
 
       <div style={{ marginTop: 12, background: "#1a1510", border: `1px solid ${C.amber}55`, borderRadius: 9, padding: "9px 13px", fontSize: 12, color: "#f0d6a6", display: "flex", gap: 8 }}>
         <AlertTriangle size={15} color={C.amber} style={{ flexShrink: 0, marginTop: 1 }} />
-        <span>Reduced-order relational model <b>calibrated</b> to the 2025-11-21 enteliWEB capture (reproduced by “Reset to capture” within ~10% on flow/DP, ~2°F on temps). <b>CV-5 is read as % bypass</b> (sysFrac to building = 1 − CV-5/100), the convention the real data requires — this contradicts the raw SCADA “0% Full By-Pass” label and must be verified against the sequence of operations (M503 ⑨, FLAG-B). The ACCU does mechanical cooling (sub-ambient LWT), not just free-cooling. OA-H is display-only.</span>
+        <span>Reduced-order relational model <b>calibrated</b> to the 2025-11-21 enteliWEB capture (every point reproduced within tolerance — see the calibration table below). <b>GWS Flow is driven by the geo pumps P3/P4</b>; building flow & DP by the primary pumps P1/P2 (P2 parallel/standby). <b>CV-5 read as % bypass</b> (verify against the SOO, M503 ⑨ / FLAG-B). <b>LWT is ambient wet-bulb driven</b> (OA-T + OA-H). The on-screen <b>ACCU Alarm</b> mirrors the live plant state and is out of model scope.</span>
       </div>
 
       {D.alerts.length > 0 && (
@@ -362,7 +180,7 @@ export default function CwPlantTwin() {
       {/* ---------------- SCADA canvas ---------------- */}
       <div style={{ background: C.canvas, border: `1px solid ${C.line}`, borderRadius: 12, padding: 8, marginTop: 12 }}>
         <svg viewBox="0 0 1480 772" style={{ width: "100%", height: "auto", display: "block" }}>
-          {/* ---------- PIPES: blue = cooler/supply loop ---------- */}
+          {/* ---------- PIPES: blue = ACCU condenser / geo-supply loop (GWS) ---------- */}
           {P([[1110, 96], [690, 96], [690, 200]], D.coolerFlow, C.blue, -1)}
           {P([[690, 264], [690, 566]], D.coolerFlow, C.blue, 1)}
           {P([[945, 150], [1110, 150]], D.coolerFlow, C.blue, 1)}
@@ -373,13 +191,13 @@ export default function CwPlantTwin() {
           {P([[800, 470], [1140, 470]], D.coolerFlow, C.blue, 1)}
           {P([[945, 470], [945, 566]], D.coolerFlow, C.blue, -1)}
           {P([[96, 566], [1412, 566]], D.GWS, C.blue, -1)}
-          {/* teal = building return */}
+          {/* teal = geo return main + building distribution branches */}
           {P([[96, 750], [1412, 750]], D.GWS, C.teal, 1)}
-          {P([[764, 566], [764, 750]], D.GWS, C.teal, 1)}
-          {P([[764, 655], [900, 655]], D.GWS, C.teal, 1)}
-          {P([[764, 728], [900, 728]], D.GWS, C.teal, 1)}
-          {P([[900, 655], [900, 728]], D.GWS, C.teal, 1)}
-          {P([[520, 566], [520, 750]], D.GWS * I.cv3 / 100, C.teal, 1)}
+          {P([[764, 566], [764, 750]], D.bldgFlow, C.teal, 1)}
+          {P([[764, 655], [900, 655]], D.P1.q, C.teal, 1)}
+          {P([[764, 728], [900, 728]], D.P2.q, C.teal, 1)}
+          {P([[900, 655], [900, 728]], D.bldgFlow, C.teal, 1)}
+          {P([[520, 566], [520, 750]], D.bldgFlow * I.cv3 / 100, C.teal, 1)}
           {P([[1140, 566], [1140, 750]], D.gwsBypassFlow, C.teal, 1)}
           {P([[1240, 566], [1240, 750]], D.gwsBypassFlow, C.teal, 1)}
 
@@ -389,10 +207,13 @@ export default function CwPlantTwin() {
           <Arrow x={1000} y={300} rot={180} on={I.accuOn} color={C.blue} />
           <Arrow x={430} y={566} rot={180} color={C.blue} /><Arrow x={1010} y={566} rot={180} color={C.blue} />
           <Arrow x={430} y={750} rot={0} color={C.teal} /><Arrow x={1180} y={750} rot={0} color={C.teal} />
+          {/* building-loop direction: return header → pump → supply header */}
+          <Arrow x={832} y={655} rot={0} on={I.p1on && I.p1 > 0} color={C.teal} />
+          <Arrow x={832} y={728} rot={0} on={I.p2on && I.p2 > 0} color={C.teal} />
 
           {/* ---------- ACCU unit ---------- */}
           <g onClick={() => setSelected({ type: "accu", id: "accu", label: "ACCU" })} style={{ cursor: "pointer" }}>
-            <title>ACCU — air-cooled heat-pump chiller (free + mechanical cooling) · click to edit</title>
+            <title>ACCU — air-cooled heat-pump chiller (wet-bulb free + mechanical cooling) · click to edit</title>
             <rect x={1110} y={60} width={168} height={86} rx={8} fill={C.box} stroke={I.accuOn ? C.blue : C.line} strokeWidth={I.accuOn ? 1.9 : 1.3} />
             {[0, 1, 2].map((i) => (<circle key={i} cx={1140 + i * 52} cy={92} r={16} fill="none" stroke={I.accuOn ? C.blue : C.dim} strokeWidth={2.4} style={I.accuOn ? { animation: "spin 1.6s linear infinite", transformOrigin: `${1140 + i * 52}px 92px` } : {}} />))}
           </g>
@@ -437,10 +258,10 @@ export default function CwPlantTwin() {
           <g>
             <rect x={414} y={250} width={214} height={160} rx={9} fill={C.panel2} stroke={C.line} />
             <Lbl x={430} y={273} size={13.5} anchor="start">System Parameters</Lbl>
-            {[["SYSTEM-EN", "True"], ["SYS-RESET", "Off"], ["WELLFIELD-REPL", "Off"], ["PMPDOWN-TIME", "300.0 s"], ["OA-T", I.oat.toFixed(1) + " °F"], ["OA-H †", I.oah.toFixed(1) + " %RH"]].map((r, i) => (
-              <text key={i} x={430} y={298 + i * 18} fontSize="12.5" fontFamily={MONO} fill={C.lab}>{r[0]}<tspan x={612} textAnchor="end" fill={r[0] === "OA-H †" ? C.dim : C.ink}>{r[1]}</tspan></text>
+            {[["SYSTEM-EN", "True"], ["SYS-RESET", "Off"], ["WELLFIELD-REPL", "Off"], ["OA-WETBULB", D.twb.toFixed(1) + " °F"], ["OA-T", I.oat.toFixed(1) + " °F"], ["OA-H", I.oah.toFixed(1) + " %RH"]].map((r, i) => (
+              <text key={i} x={430} y={298 + i * 18} fontSize="12.5" fontFamily={MONO} fill={C.lab}>{r[0]}<tspan x={612} textAnchor="end" fill={r[0] === "OA-WETBULB" ? C.geo : C.ink}>{r[1]}</tspan></text>
             ))}
-            <text x={430} y={404} fontSize="10" fontFamily={SANS} fill={C.dim}>† display-only — air-cooled plant (dry-bulb)</text>
+            <text x={430} y={404} fontSize="10" fontFamily={SANS} fill={C.dim}>OA-T + OA-H → wet-bulb → free-cooling LWT</text>
           </g>
 
           {/* CV-5 */}
@@ -450,7 +271,7 @@ export default function CwPlantTwin() {
           <text x={596} y={536} textAnchor="middle" fontSize="11" fontFamily={SANS} fill={C.lab}>0% Full System Flow</text>
           <text x={596} y={550} textAnchor="middle" fontSize="11" fontFamily={SANS} fill={C.lab}>100% Full By-Pass</text>
 
-          {/* pumps + status */}
+          {/* pumps + status — P3/P4 geo (drive GWS) · P1/P2 building (parallel) */}
           <PumpGlyph x={800} y={400} id="p4" label="P4" speed={I.p4} on={I.p4on} />
           <PumpStatus x={900} y={386} prefix="P4" on={I.p4on} speed={I.p4} />
           <PumpGlyph x={1140} y={400} id="p3" label="P3" speed={I.p3} on={I.p3on} />
@@ -459,6 +280,7 @@ export default function CwPlantTwin() {
           <PumpStatus x={935} y={609} prefix="P1" on={I.p1on} speed={I.p1} />
           <PumpGlyph x={830} y={728} id="p2" label="P2" speed={I.p2} on={I.p2on} />
           <PumpStatus x={935} y={705} prefix="P2" on={I.p2on} speed={I.p2} />
+          <text x={830} y={772} textAnchor="middle" fontSize="10.5" fontFamily={SANS} fill={C.dim}>P1 · P2 building pumps (parallel · common suction @ left / common discharge @ right)</text>
 
           {/* lower valves */}
           <ValveGlyph x={520} y={658} id="cv3" label="GWS Min Flow (CV-3)" pos={I.cv3} />
@@ -486,12 +308,48 @@ export default function CwPlantTwin() {
           <Reading x={1404} y={510} label="Geo ST" value={f1(I.geoST)} unit="°F" anchor="end" />
           <Reading x={1404} y={690} label="Geo RT" value={f1(D.geoRT)} unit="°F" anchor="end" />
 
-          <text x={740} y={766} fontSize="11.5" fontFamily={MONO} fill={C.dim}>pipe width ∝ flow · blue = condenser/supply loop · teal = building return · dashes animate with flow · click any pump / valve / panel to edit</text>
+          <text x={740} y={766} fontSize="11.5" fontFamily={MONO} fill={C.dim}>pipe width ∝ flow · blue = ACCU condenser / geo-supply loop · teal = geo return + building branches · dashes animate with flow · click any pump / valve / panel to edit</text>
         </svg>
       </div>
 
       {/* ---------------- controls ---------------- */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(300px,1fr))", gap: 12, marginTop: 12 }}>
+
+        {/* ---------- Calibration · Real vs Sim vs Variance ---------- */}
+        <Panel icon={Target} title="Calibration · Real vs Sim vs Variance" span right={
+          <span style={{ fontFamily: MONO, fontSize: 11, color: atCapture ? C.green : C.amber }}>
+            {atCapture ? "at 2025-11-21 capture" : "inputs moved off capture"}
+          </span>
+        }>
+          <div style={{ fontSize: 11.5, color: C.txt2, marginBottom: 8, lineHeight: 1.5 }}>
+            Real enteliWEB readings (2025-11-21) vs the simulator at the <b>current inputs</b>. At the capture every point is in tolerance; move a control to explore the response (variance is measured against the fixed capture readings). {!atCapture && <span>— <button onClick={loadCapture} style={{ cursor: "pointer", background: "transparent", border: "none", color: C.blue, fontFamily: MONO, fontSize: 11.5, padding: 0, textDecoration: "underline" }}>load the capture</button> to return.</span>}
+          </div>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: MONO, fontSize: 12 }}>
+            <thead><tr>
+              {["Point", "Real", "Sim", "Variance", "Tol", ""].map((h, i) => (
+                <th key={i} style={{ textAlign: i === 0 ? "left" : "right", padding: "5px 8px", color: C.dim, borderBottom: `1px solid ${C.line}`, fontWeight: 600 }}>{h}</th>
+              ))}
+            </tr></thead>
+            <tbody>
+              {cmp.map((r, i) => {
+                const up = r.variance > 0;
+                return (
+                  <tr key={i} style={{ borderTop: i ? `1px solid ${C.soft}` : "none" }}>
+                    <td style={{ padding: "5px 8px", color: C.lab, fontFamily: SANS }}>{r.label}</td>
+                    <td style={{ padding: "5px 8px", textAlign: "right", color: C.ink }}>{r.real.toFixed(1)}</td>
+                    <td style={{ padding: "5px 8px", textAlign: "right", color: C.ink, fontWeight: 600 }}>{r.sim.toFixed(1)}<span style={{ color: C.unit, fontSize: 10 }}> {r.unit}</span></td>
+                    <td style={{ padding: "5px 8px", textAlign: "right", color: r.pass ? C.txt2 : C.red }}>{up ? "+" : ""}{r.variance.toFixed(1)}</td>
+                    <td style={{ padding: "5px 8px", textAlign: "right", color: C.dim }}>{r.tolText}</td>
+                    <td style={{ padding: "5px 8px", textAlign: "right", color: r.pass ? C.green : C.red, fontWeight: 700 }}>{r.pass ? "✓" : "✗"}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+          <div style={{ fontSize: 10, color: C.dim, marginTop: 8, lineHeight: 1.5 }}>
+            Fitted constants (all anchored to this capture): GWS-T offset {CONSTANTS.GWS_SUPPLY_OFFSET.toFixed(1)}°F · Geo-RT offset {CONSTANTS.GEO_RT_OFFSET.toFixed(1)}°F · ACCU loop ΔT {CONSTANTS.ACCU_LOOP_DT.toFixed(1)}°F · LWT wet-bulb offset {CONSTANTS.LWT_WB_OFFSET.toFixed(1)}°F (ambient WB {wetBulbF(BASE.oat, BASE.oah).toFixed(1)}°F) · BTU supply offset {CONSTANTS.BTU_SUP_OFFSET.toFixed(1)}°F · BTU branch ΔT {CONSTANTS.BTU_DT_REF.toFixed(1)}°F · geo design {CAPTURE.GWS.toFixed(0)} GPM @ P3+P4 {CONSTANTS.GEO_SPEED_REF}%. Same table prints from <span style={{ fontFamily: MONO }}>node src/twins/cwPlantModel.test.mjs</span>.
+          </div>
+        </Panel>
 
         {/* ---------- Glycol concentration control — fluid properties & system impacts ---------- */}
         <Panel icon={Beaker} title="Glycol Concentration (%) — fluid properties & loop impact" span right={
@@ -628,6 +486,7 @@ export default function CwPlantTwin() {
         <Panel title={selected ? `Editing · ${selected.label}` : "Parameter editor"}>
           {selected?.type === "pump" && (() => {
             const k = selected.id, onK = k + "on", p = D[k.toUpperCase()];
+            const isGeo = k === "p3" || k === "p4";
             return (<div>
               <div style={{ marginBottom: 10 }}><Toggle label={selected.label} on={I[onK]} onChange={(v) => { setI((s) => ({ ...s, [onK]: v })); setLastChange(`${selected.label} ${v ? "ON" : "OFF"}`); }} /></div>
               <Slider label="Speed (affinity)" value={I[k]} min={0} max={100} unit="%" accent={C.amber} onChange={set(k, `${selected.label} speed`)} note="Q ∝ N · H ∝ N² · P ∝ N³" />
@@ -636,29 +495,35 @@ export default function CwPlantTwin() {
                 <span style={{ color: C.txt2 }}>flow <b style={{ color: C.ink }}>{f0(p.q)}</b> GPM</span>
                 <span style={{ color: C.txt2 }}>power <b style={{ color: C.amber }}>{f1(p.hp)}</b> HP</span>
               </div>
+              <div style={{ fontSize: 11, color: C.txt2, marginTop: 8, lineHeight: 1.5 }}>
+                {isGeo
+                  ? `Geo / chiller-condenser pump — P3 + P4 drive GWS Flow (now ${f0(D.GWS)} GPM at combined ${f0(D.geoSpeed)}%). Throttle P3 for lead/lag staging.`
+                  : `Building primary VS pump — P1 + P2 are parallel on a common header (lead/standby) and drive building flow (now ${f0(D.bldgFlow)} GPM at combined ${f0(D.bSpeed)}%) and DP. Off ⇒ its branch carries 0 GPM.`}
+              </div>
             </div>);
           })()}
           {selected?.type === "valve" && (
             <Slider label="Position" value={I[selected.id]} min={0} max={100} unit="% open" accent={C.blue} onChange={set(selected.id, `${selected.label}`)}
-              note={selected.id === "cv5" ? "% bypass (↑ = warmer building supply; 0% = full cold flow to building)" : selected.id === "cv3" ? "GWS minimum-flow recirculation" : "wellfield bypass — opens to route >500 GPM around the wellfield"} />
+              note={selected.id === "cv5" ? "% bypass (↑ = warmer building supply; 0% = full cold flow to building)" : selected.id === "cv3" ? "building minimum-flow recirculation (opens at pump min speed to hold DP)" : "wellfield bypass — diverts flow >500 GPM AROUND the wellfield (GWS reads wellfield flow, so it falls as this opens)"} />
           )}
           {selected?.type === "accu" && (<div>
             <Toggle label="ACCU" on={I.accuOn} onChange={(v) => { setI((s) => ({ ...s, accuOn: v })); setLastChange(`ACCU ${v ? "ON" : "OFF"}`); }} />
             <div style={{ height: 8 }} />
             <Slider label="CV-5 (% bypass)" value={I.cv5} min={0} max={100} unit="%" accent={C.amber} onChange={set("cv5", "CV-5 position")} note="diverting valve · 100% = full bypass (recirculates), 0% = full cold flow to building" />
-            <div style={{ fontFamily: MONO, fontSize: 12.5, color: C.txt2, marginTop: 4 }}>LWT <b style={{ color: C.ink }}>{f1(D.LWT)}</b>°F · to system <b style={{ color: C.ink }}>{f0(D.coolerToSystem)}</b> GPM · bypass <b style={{ color: C.ink }}>{f0(D.coolerBypass)}</b> GPM</div>
+            <div style={{ fontFamily: MONO, fontSize: 12.5, color: C.txt2, marginTop: 4 }}>LWT <b style={{ color: C.ink }}>{f1(D.LWT)}</b>°F (wet-bulb {f1(D.twb)}°F) · EWT <b style={{ color: C.ink }}>{f1(D.EWT)}</b>°F · ΔT <b style={{ color: C.ink }}>{f1(D.dtAccu)}</b>°F · to system <b style={{ color: C.ink }}>{f0(D.coolerToSystem)}</b> GPM</div>
           </div>)}
           {selected?.type === "setpoints" && (<div>
-            <Slider label="ACCU-1-LWT-SP" value={I.lwtSP} min={40} max={75} unit="°F" onChange={set("lwtSP", "LWT setpoint")} note="mechanical cooling pulls LWT sub-ambient toward this SP (capacity-limited)" />
+            <Slider label="ACCU-1-LWT-SP" value={I.lwtSP} min={40} max={75} unit="°F" onChange={set("lwtSP", "LWT setpoint")} note="floor on the wet-bulb free-cooling LWT" />
             <Slider label="CHWDP-SP" value={I.chwdpSP} min={4} max={15} unit="psi" onChange={set("chwdpSP", "CHWDP-SP")} />
-            <Slider label="ACCU-CV5-TEMP-SP" value={I.cv5tempSP} min={50} max={90} unit="°F" onChange={set("cv5tempSP", "CV5-TEMP-SP")} />
+            <Slider label="ACCU-CV5-TEMP-SP" value={I.cv5tempSP} min={50} max={90} unit="°F" onChange={set("cv5tempSP", "CV5-TEMP-SP")} note="CV-5 holds entering-chiller water (EWT/TS-2) at/below this" />
           </div>)}
-          {selected?.type === "btu" && (<div style={{ fontSize: 12.5, color: C.lab, lineHeight: 1.7 }}>Read-only meter. Supply <b style={{ color: C.ink }}>{f1(D.BTUsup)}</b>°F · Return <b style={{ color: C.ink }}>{f1(D.BTUret)}</b>°F · Flow <b style={{ color: C.ink }}>{f1(D.BTUflow)}</b> GPM · duty <b style={{ color: C.ink }}>{f1(500 * D.BTUflow * (D.BTUret - D.BTUsup) / 12000)}</b> ton.</div>)}
+          {selected?.type === "btu" && (<div style={{ fontSize: 12.5, color: C.lab, lineHeight: 1.7 }}>Read-only meter. Supply <b style={{ color: C.ink }}>{f1(D.BTUsup)}</b>°F · Return <b style={{ color: C.ink }}>{f1(D.BTUret)}</b>°F · Flow <b style={{ color: C.ink }}>{f1(D.BTUflow)}</b> GPM · duty <b style={{ color: C.ink }}>{f1(500 * D.BTUflow * (D.BTUret - D.BTUsup) / 12000)}</b> ton. Driven by the building pumps P1/P2.</div>)}
           {!selected && <div style={{ fontSize: 12.5, color: C.lab, lineHeight: 1.6 }}>Click a pump, valve, the ACCU, or the setpoints panel on the diagram to edit it. Environment, pipe, and fluid controls are always available here.</div>}
         </Panel>
 
         <Panel icon={Thermometer} title="Environment & loads">
-          <Slider label="Outdoor air temp" value={I.oat} min={20} max={100} unit="°F" accent={C.geo} onChange={set("oat", "OA-T")} note="free-cooling floor + air-cooled chiller capacity derate" />
+          <Slider label="Outdoor air temp" value={I.oat} min={20} max={100} unit="°F" accent={C.geo} onChange={set("oat", "OA-T")} note="feeds the ambient wet-bulb → free-cooling LWT" />
+          <Slider label="Outdoor air humidity" value={I.oah} min={5} max={100} unit="%RH" accent={C.geo} onChange={set("oah", "OA-H")} note={`with OA-T → wet-bulb ${f1(D.twb)}°F (drives LWT)`} />
           <Slider label="Geo supply temp" value={I.geoST} min={50} max={85} unit="°F" accent={C.geo} onChange={set("geoST", "Geo ST")} />
           <Slider label="Building load" value={I.bldgTons} min={0} max={120} unit="ton" accent={C.teal} onChange={set("bldgTons", "Building load")} note="geothermal-loop cooling load → drives GWR-T & BTU return" />
           <div style={{ fontSize: 11, letterSpacing: 1, color: C.dim, textTransform: "uppercase", margin: "10px 0", display: "flex", alignItems: "center", gap: 6 }}><Droplets size={13} /> Pipe</div>
@@ -690,18 +555,18 @@ export default function CwPlantTwin() {
                 <XAxis dataKey="s" stroke={C.txt2} fontSize={10.5} fontFamily={MONO} tickLine={false} />
                 <YAxis stroke={C.txt2} fontSize={10.5} fontFamily={MONO} tickLine={false} />
                 <Tooltip contentStyle={{ background: "#0a0e15", border: `1px solid ${C.line}`, borderRadius: 8, fontFamily: MONO, fontSize: 11.5 }} labelFormatter={(v) => `P1 ${v}%`} />
-                <Line dataKey="flow" name="GWS GPM" stroke={C.blue} strokeWidth={2} dot={false} />
+                <Line dataKey="flow" name="Bldg GPM" stroke={C.teal} strokeWidth={2} dot={false} />
                 <Line dataKey="hp" name="P1 HP" stroke={C.amber} strokeWidth={2} dot={false} />
-                {I.p1on && <ReferenceDot x={Math.round(I.p1 / 5) * 5} y={+D.GWS.toFixed(0)} r={4} fill={C.blue} stroke="#fff" />}
+                {I.p1on && <ReferenceDot x={Math.round(I.p1 / 5) * 5} y={+D.bldgFlow.toFixed(0)} r={4} fill={C.teal} stroke="#fff" />}
               </LineChart>
             </ResponsiveContainer>
           </div>
-          <div style={{ fontFamily: MONO, fontSize: 10.5, color: C.txt2 }}>blue = GWS flow · amber = P1 power (∝ speed³) · dot = current</div>
+          <div style={{ fontFamily: MONO, fontSize: 10.5, color: C.txt2 }}>teal = building flow · amber = P1 power (∝ speed³) · dot = current · (GWS Flow is set by P3/P4, not P1)</div>
         </Panel>
       </div>
 
       <div style={{ marginTop: 18, paddingTop: 12, borderTop: `1px solid ${C.line}`, fontSize: 10.5, color: C.dim, fontFamily: MONO }}>
-        Layout matched to the 2025-11-21 enteliWEB capture · relational twin calibrated to that duty point · not a full P&ID hydraulic network solution
+        Layout matched to the 2025-11-21 enteliWEB capture · relational twin calibrated to that duty point · model + calibration test in src/twins/cwPlantModel.js · not a full P&ID hydraulic network solution
       </div>
     </div>
   );
