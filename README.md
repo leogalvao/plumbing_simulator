@@ -38,11 +38,25 @@ src/
 
 These are **decision-support twins**, not calibrated P&ID hydraulic solutions:
 
-- **CW Plant twin** is a reduced-order *relational* model anchored to the capture.
-  Physical forms and directions are correct; absolute values away from the
-  baseline are illustrative. `CV-5 = % cooled flow delivered to the building`
-  (0.0 % reads as full bypass). Confirm the CV-5 convention against the sequence
-  of operations.
+- **CW Plant twin** is a reduced-order *relational* model anchored to the
+  2025-11-21 enteliWEB capture. The physics live in `src/twins/cwPlantModel.js`
+  (pure, no React) and are checked head-less by `src/twins/cwPlantModel.test.mjs`
+  (`node src/twins/cwPlantModel.test.mjs` prints Real vs Sim vs Variance and
+  fails if any point is out of tolerance). Topology is physically correct:
+  - **GWS Flow (geo loop) is driven by the geo/condenser pumps P3 + P4** —
+    throttling P3 (lead/lag) lowers GWS, which is how the plant holds ~671 GPM
+    with P4 at 100 %. **Building flow / New-Add DP / Existing DP / BTU branch are
+    driven by the primary VS pumps P1 + P2** (parallel, lead/standby — P2 Off ⇒
+    its branch carries zero flow).
+  - **CV-1-1/CV-1-2 (wellfield bypass) divert** flow *around* the wellfield; GWS
+    reads the wellfield flow, so opening them lowers it (they are not an additive
+    path). Closed bypass ⇒ full pump flow on GWS.
+  - **LWT is ambient wet-bulb driven** (`wetbulb(OA-T, OA-H) + offset`), so OA-H
+    now feeds the model; **EWT = LWT + ACCU loop ΔT**, capped by the CV-5
+    diverting setpoint.
+  - `CV-5 = % bypass` (0 % ⇒ full cold flow to building). Confirm the CV-5
+    convention against the sequence of operations (M503 ⑨ / FLAG-B).
+  The on-screen **ACCU Alarm** mirrors the live plant and is out of model scope.
 - **WSHP hydraulic twin** takes topology, pipe sizes and design GPM from the
   riser; velocity and head loss are computed. Segment **lengths are assumed**
   (branch 25 ft / header 30 ft / main 150 ft, scalable). Pump operating points,
@@ -58,3 +72,13 @@ These are **decision-support twins**, not calibrated P&ID hydraulic solutions:
   (`dia` override map) and Reset correctly returns every segment to design size.
 - Added at-a-glance KPI strips, hover tooltips on diagram glyphs, a sticky header,
   focus-visible outlines, and responsive/mobile-friendly layout.
+- **CW Plant recalibration (2025-11-21 capture).** Extracted the plant physics
+  into a pure, testable `cwPlantModel.js`; re-derived the flow topology so the
+  **geo loop (GWS) is driven by P3/P4** and the **building loop by P1/P2** (P2 is
+  now a true parallel/standby pump with a dead branch when off); made the
+  **wellfield bypass divert** instead of inflating GWS; replaced the dry-bulb
+  free-cooling floor with a **wet-bulb LWT model** (EWT = LWT + loop ΔT); and
+  re-anchored every fitted constant to the capture. Added a **"Load 2025-11-21
+  capture" preset** and an in-app **Real vs Sim vs Variance** calibration table
+  (mirrored by the head-less test). All 11 calibration points land within their
+  acceptance tolerances.
